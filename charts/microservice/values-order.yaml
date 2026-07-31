@@ -1,6 +1,6 @@
 image:
   repository: 589389425618.dkr.ecr.us-east-1.amazonaws.com/order-service
-  tag: "39bee57c5b2c"
+  tag: "ba5f1ae109ff"
 
 ingress:
   path: "order"
