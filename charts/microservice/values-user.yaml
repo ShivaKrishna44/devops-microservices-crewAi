@@ -1,6 +1,6 @@
 image:
   repository: 589389425618.dkr.ecr.us-east-1.amazonaws.com/user-service
-  tag: "c5009108bf4e"
+  tag: "eae64ddfe7d1"
 
 ingress:
   path: "user"
