@@ -10,9 +10,7 @@ jobs:
       payment: ${{ steps.changes.outputs.payment }}
       user: ${{ steps.changes.outputs.user }}
     steps:
-      - uses: actions/checkout@v4
-      
-      # Execute path filtering ONLY during push events to avoid empty diff errors
+      - uses: actions/checkout@v4 
       - name: Check paths
         if: github.event_name == 'push'
         uses: dorny/paths-filter@v3
@@ -36,8 +34,7 @@ jobs:
       (github.event_name == 'push' && needs.detect-changes.outputs.order == 'true') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.service_name == 'order-service')
     steps:
-      # ... (keep your existing steps unchanged)
-
+     
   # ==========================================
   # Build & Push — Payment Service
   # ==========================================
@@ -48,8 +45,6 @@ jobs:
       (github.event_name == 'push' && needs.detect-changes.outputs.payment == 'true') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.service_name == 'payment-service')
     steps:
-      # ... (keep your existing steps unchanged)
-
   # ==========================================
   # Build & Push — User Service
   # ==========================================
@@ -60,4 +55,3 @@ jobs:
       (github.event_name == 'push' && needs.detect-changes.outputs.user == 'true') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.service_name == 'user-service')
     steps:
-      # ... (keep your existing steps unchanged)
