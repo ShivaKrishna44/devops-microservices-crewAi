@@ -50,7 +50,7 @@ Production-ready microservices platform on AWS EKS using **GitHub Actions** for 
 | Scaling        | Need more agents for parallel builds           | Auto-scales (unlimited runners) |
 
 ---
-
+   
 
 ## Project Structure
 
