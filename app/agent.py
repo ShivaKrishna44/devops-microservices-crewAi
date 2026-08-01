@@ -24,8 +24,14 @@ def sanitize(text: str) -> str:
 
 def run_health_check(agent, repo: str) -> None:
     query = (
-        f"Perform a systems health check. Audit active GitHub builds for '{repo}' "
-        f"and inspect our remote AWS cluster. Respond in short plain-text sentences without emojis."
+        f"Perform a full infrastructure health check. Do ALL of the following:\n"
+        f"1. Check GitHub Actions workflow status for '{repo}'\n"
+        f"2. Check AWS EC2 instance health\n"
+        f"3. Check Kubernetes pod health in all namespaces (try: default, order-service, payment-service, user-service)\n"
+        f"4. Check Kubernetes node health\n"
+        f"5. Check for idle EC2 instances wasting money\n"
+        f"6. Check for unattached EBS volumes\n"
+        f"Respond in short plain-text sentences. Report any issues found."
     )
     inputs = {"messages": [("user", query)]}
 

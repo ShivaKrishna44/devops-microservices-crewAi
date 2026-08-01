@@ -172,9 +172,22 @@ Each transaction trace block in LangSmith represents one explicit graph executio
 
 ## Current Tool Matrix Implementation
 
-| Tool Interface | Functional Purpose |
-| :--- | :--- |
-| `check_github_workflow_status()` | Validates active GitHub Actions pipeline build histories. |
-| `check_aws_ec2_health()` | Verifies live EC2 instance operation state metrics. |
-| `check_local_microservices_containers()` | Probes local container status (can be re-enabled). |
-| `trigger_github_workflow_rerun()` | Auto-remediates failed pipeline configurations. |
+| Category | Tool | What it does |
+| :--- | :--- | :--- |
+| **AWS** | `check_aws_ec2_health()` | Finds EC2 instances that are not running/healthy |
+| **GitHub** | `check_github_workflow_status(repo)` | Checks last 10 workflow runs for failures |
+| **Kubernetes** | `check_k8s_pod_health(namespace)` | Finds pods NOT in Running/Completed state |
+| **Kubernetes** | `check_k8s_node_health()` | Finds nodes in NotReady state |
+| **Kubernetes** | `check_k8s_deployments(namespace)` | Finds deployments with missing replicas |
+| **Deployment** | `check_rollout_status(deployment, ns)` | Is rollout complete, progressing, or stuck? |
+| **Deployment** | `rollback_deployment(deployment, ns)` | Rolls back to previous version |
+| **Deployment** | `get_deployment_history(deployment, ns)` | Shows revision history |
+| **Deployment** | `restart_deployment(deployment, ns)` | Rolling restart (zero downtime) |
+| **Incident** | `get_pod_crash_logs(pod, ns)` | Gets logs from crashed container (--previous) |
+| **Incident** | `get_cluster_events(ns)` | Shows recent Warning events |
+| **Incident** | `diagnose_pod(pod, ns)` | Full diagnosis: status + exit code + events |
+| **Migration** | `convert_jenkinsfile_to_github_actions(content)` | Generates GHA YAML from Jenkinsfile |
+| **Migration** | `analyze_jenkinsfile_complexity(content)` | Determines Tier 1/2/3 migration effort |
+| **Cost** | `find_idle_ec2_instances()` | Finds instances with < 5% CPU (wasting money) |
+| **Cost** | `find_unattached_ebs_volumes()` | Finds EBS volumes not attached to anything |
+| **Cost** | `get_cost_summary()` | Current month AWS spend by service |
