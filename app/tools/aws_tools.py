@@ -1,9 +1,9 @@
 import boto3
-from langchain_core.tools import tool
+from crewai.tools import tool
 from config import settings, logger
 
 
-@tool
+@tool("Check AWS EC2 Health")
 def check_aws_ec2_health() -> str:
     """Queries AWS to check for any EC2 instances that are not healthy or running."""
     logger.info("Running AWS EC2 health scan...")

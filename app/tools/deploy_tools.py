@@ -1,6 +1,6 @@
 """Deployment tools — trigger rollout, check status, rollback."""
 import subprocess
-from langchain_core.tools import tool
+from crewai.tools import tool
 from config import logger
 
 
@@ -23,7 +23,7 @@ def _run_kubectl(cmd: str) -> str:
         return f"kubectl failed: {e}"
 
 
-@tool
+@tool("Check Rollout Status")
 def check_rollout_status(deployment: str, namespace: str = "default") -> str:
     """Checks if a Kubernetes deployment rollout is progressing, complete, or stuck."""
     logger.info("Checking rollout status: %s in %s", deployment, namespace)
@@ -38,7 +38,7 @@ def check_rollout_status(deployment: str, namespace: str = "default") -> str:
         return f"Deployment '{deployment}' rollout status: {output}"
 
 
-@tool
+@tool("Rollback Deployment")
 def rollback_deployment(deployment: str, namespace: str = "default") -> str:
     """Rolls back a Kubernetes deployment to the previous revision."""
     logger.info("Rolling back deployment: %s in %s", deployment, namespace)
@@ -51,7 +51,7 @@ def rollback_deployment(deployment: str, namespace: str = "default") -> str:
         return f"ROLLBACK FAILED for '{deployment}': {output}"
 
 
-@tool
+@tool("Get Deployment History")
 def get_deployment_history(deployment: str, namespace: str = "default") -> str:
     """Shows the revision history of a deployment (for rollback decisions)."""
     logger.info("Getting deployment history: %s in %s", deployment, namespace)
@@ -64,7 +64,7 @@ def get_deployment_history(deployment: str, namespace: str = "default") -> str:
     return f"Deployment history for '{deployment}':\n{output}"
 
 
-@tool
+@tool("Restart Deployment")
 def restart_deployment(deployment: str, namespace: str = "default") -> str:
     """Restarts all pods of a deployment (rolling restart — zero downtime)."""
     logger.info("Restarting deployment: %s in %s", deployment, namespace)

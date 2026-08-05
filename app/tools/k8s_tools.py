@@ -1,7 +1,7 @@
 """Kubernetes health check tools — checks pods, nodes, deployments."""
 import subprocess
 import json
-from langchain_core.tools import tool
+from crewai.tools import tool
 from config import logger
 
 
@@ -24,7 +24,7 @@ def _run_kubectl(cmd: str) -> str:
         return f"kubectl failed: {e}"
 
 
-@tool
+@tool("Check K8s Pod Health")
 def check_k8s_pod_health(namespace: str = "default") -> str:
     """Checks Kubernetes pod health in a given namespace. Finds pods that are NOT Running/Completed."""
     logger.info("Checking K8s pod health in namespace: %s", namespace)
@@ -52,7 +52,7 @@ def check_k8s_pod_health(namespace: str = "default") -> str:
     return f"K8s ALERT: Unhealthy pods in '{namespace}': " + ", ".join(unhealthy)
 
 
-@tool
+@tool("Check K8s Node Health")
 def check_k8s_node_health() -> str:
     """Checks Kubernetes node health. Finds nodes that are NotReady or have resource pressure."""
     logger.info("Checking K8s node health...")
@@ -76,7 +76,7 @@ def check_k8s_node_health() -> str:
     return "K8s ALERT: Node issues detected: " + ", ".join(issues)
 
 
-@tool
+@tool("Check K8s Deployments")
 def check_k8s_deployments(namespace: str = "default") -> str:
     """Checks if all deployments have desired replicas available."""
     logger.info("Checking K8s deployments in namespace: %s", namespace)

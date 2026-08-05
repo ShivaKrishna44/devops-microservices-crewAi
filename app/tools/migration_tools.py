@@ -1,9 +1,9 @@
 """Migration tools — analyze Jenkinsfile and generate GitHub Actions YAML."""
-from langchain_core.tools import tool
+from crewai.tools import tool
 from config import logger
 
 
-@tool
+@tool("Convert Jenkinsfile to GitHub Actions")
 def convert_jenkinsfile_to_github_actions(jenkinsfile_content: str) -> str:
     """Analyzes a Jenkinsfile and generates equivalent GitHub Actions workflow YAML.
     Pass the full Jenkinsfile content as input."""
@@ -78,7 +78,7 @@ jobs:"""
     return f"Generated GitHub Actions workflow:\n```yaml\n{yaml_output}\n{recommendations}\n```"
 
 
-@tool
+@tool("Analyze Jenkinsfile Complexity")
 def analyze_jenkinsfile_complexity(jenkinsfile_content: str) -> str:
     """Analyzes a Jenkinsfile to determine migration complexity (Tier 1/2/3).
     Tier 1 = simple, Tier 2 = moderate (Docker+K8s), Tier 3 = complex (approvals+multi-stage)."""

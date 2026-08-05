@@ -1,6 +1,7 @@
-langchain-core==0.3.63
-langchain-groq==0.3.2
-langgraph==0.4.1
-python-dotenv==1.1.0
-boto3==1.38.0
-PyGithub==2.6.1
+crewai[litellm]>=1.15.0
+crewai-tools>=0.40.0
+python-dotenv>=1.2.2
+boto3>=1.38.0
+PyGithub>=2.6.0
+fastapi>=0.115.0
+uvicorn>=0.32.0

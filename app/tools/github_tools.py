@@ -1,9 +1,9 @@
 from github import Github, Auth
-from langchain_core.tools import tool
+from crewai.tools import tool
 from config import settings, logger
 
 
-@tool
+@tool("Check GitHub Workflow Status")
 def check_github_workflow_status(repo_name: str) -> str:
     """Checks the specified GitHub repository for any failed workflow runs."""
     logger.info("Scanning GitHub Actions for repo: %s", repo_name)

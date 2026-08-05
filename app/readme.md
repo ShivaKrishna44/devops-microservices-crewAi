@@ -1,193 +1,165 @@
-# DevOps AI Agent Execution Flow
+# DevOps AI Agent — CrewAI Multi-Agent Platform
 
 ## Overview
-This document explains how the LangGraph-powered DevOps AI Agent processes a user request, invokes external tools, and generates a consolidated infrastructure health report.
+This project uses **CrewAI** with a **hierarchical process** (manager agent auto-delegates) to run a team of specialized DevOps agents that monitor infrastructure, detect issues, and optimize costs.
 
 ---
 
-## High-Level Architecture
+## Architecture (CrewAI)
 
 ```text
-                 User Request
-                      │
-                      ▼
-             LangGraph Agent Node
-                      │
-          ┌───────────┴────────────┐
-          │                        │
-   Needs Tool?               No Tool Needed
-          │                        │
-          ▼                        ▼
-     Tool Router             Final Response
-          │
-          ▼
-  GitHub / AWS / Docker / ...
-          │
-          ▼
-      Tool Response
-          │
-          ▼
-     LangGraph Agent
-          │
-          ▼
-     Final Summary
+                    User Query
+                        │
+                        ▼
+              ┌─────────────────┐
+              │  MANAGER AGENT  │  (auto — CrewAI hierarchical)
+              │  (decides who   │
+              │   to delegate)  │
+              └─────────────────┘
+                        │
+      ┌─────────┬──────┼──────┬──────────┬───────────┐
+      ▼         ▼      ▼      ▼          ▼           ▼
+ ┌────────┐ ┌──────┐ ┌──────┐ ┌────────┐ ┌────────┐ ┌──────────┐
+ │  K8s   │ │ AWS  │ │Deploy│ │  Cost  │ │Incident│ │Migration │
+ │ Agent  │ │Agent │ │Agent │ │ Agent  │ │ Agent  │ │  Agent   │
+ └────────┘ └──────┘ └──────┘ └────────┘ └────────┘ └──────────┘
+      │         │       │          │          │           │
+  K8s tools  AWS+GH  rollout   cost scan  crash logs  Jenkinsfile
+              tools    tools     tools     + events    converter
 ```
 
 ---
 
-## Step-by-Step Walkthrough
+## vs Previous LangGraph Architecture
 
-### Step 1 – User Prompt
-The monitoring application starts by creating a system request:
-- Perform a systems health check.
-- Audit GitHub workflows.
-- Inspect AWS infrastructure.
-- Generate a concise health report.
+| Aspect | LangGraph (before) | CrewAI (now) |
+|--------|-------------------|--------------|
+| Orchestration | Manual StateGraph + supervisor node | Built-in hierarchical process |
+| Code complexity | 200+ lines in multi_agent.py | ~50 lines in crew.py |
+| Agent routing | Custom conditional edges | Manager auto-delegates |
+| Tool loops | Manual 5-iteration loop | CrewAI handles automatically |
+| Memory | Manual state dict | Built-in (optional) |
+| Delegation | Not supported | Native agent-to-agent delegation |
 
-**Terminal Execution:**
+---
+
+## Quick Start
+
 ```bash
-=== Triage Loop Initiated ===
-```
+# 1. Install dependencies
+cd app
+pip install -r requirements.txt
 
-### Step 2 – LangGraph Receives Request
-The request is sent to the LangGraph workflow graph engine:
-```text
-START ──> Agent Node
-```
-- The LLM analyzes the request payload.
-- Instead of answering immediately, it determines that external information is required to satisfy the operational constraints.
+# 2. Copy .env and fill in your keys
+cp .env.example .env
 
-### Step 3 – Tool Selection
-The LLM decides which tool should be executed first.
-- **Tool Selected:** `check_github_workflow_status()`
-- **LangSmith Structural Trace:** `AI` ──> `Tool Call` (`check_github_workflow_status`)
+# 3. Run full health check
+python agent.py
 
-### Step 4 – GitHub Tool Execution
-The GitHub tool connects directly to the GitHub REST API using the following sequence:
-1. Authenticate using Personal Access Token.
-2. Retrieve the last 10 GitHub Actions workflow runs.
-3. Check workflow conclusions.
-4. Detect failures.
+# 4. Run with custom query
+python agent.py "check kubernetes pods in order-service namespace"
+python agent.py "find cost waste"
+python agent.py "convert Jenkinsfile to GitHub Actions"
 
-**Terminal Output:**
-```bash
-Scanning GitHub repo pipelines...
-GitHub Actions check complete. 0 failures.
-```
-
-**Tool Output String:**
-```text
-GitHub Status: All recent builds passed successfully.
-```
-
-### Step 5 – LangGraph Re-evaluates State
-After receiving the GitHub result, LangGraph appends the message and loops execution back to the LLM node.
-- **Current State Memory:** `User Prompt` + `GitHub Status`
-- The model evaluates the updated thread history and determines that AWS status information is still required.
-
-### Step 6 – AWS Tool Invocation
-LangGraph routes the next graph turn execution straight to the AWS endpoint vector:
-- **Target Node:** `check_aws_ec2_health()`
-
-**Terminal Status:**
-```bash
-Running AWS infrastructure scan...
-```
-
-**Operations Lifecycle:**
-1. Connect to AWS EC2 endpoint wrapper.
-2. List available instances.
-3. Verify instance execution states.
-4. Detect unhealthy infrastructure resources.
-
-**Result Matrix:**
-```bash
-AWS Cloud check complete. 0 issues found.
-```
-
-### Step 7 – State Update
-The core conversational memory graph state now holds the complete dataset:
-- `User Prompt` + `GitHub Result` + `AWS Result`
-
-LangGraph queries the conditional edge router function: **Do we still need more tools?**
-- **Evaluation Result:** `No`
-- **Workflow Edge Resolution:** `should_continue()` ──> `END`
-
-### Step 8 – Final Response Generation
-The LLM consumes the compiled tool context from state memory and flattens it into a single clean operational text summary.
-- **Generated Summary:** All recent GitHub builds passed successfully. AWS infrastructure is healthy and running.
-
-**Terminal Finalization:**
-```bash
-Run completed successfully. System triage complete.
+# 5. Run web dashboard
+uvicorn web.app:app --reload --port 8000
 ```
 
 ---
 
-## LangGraph Execution Trace
+## File Structure
 
-```text
-  START
-    │
-    ▼
-  Agent
-    │
-    ▼
-Tool Decision ──> GitHub Tool ──> Agent
-    │
-    ▼
-Tool Decision ──> AWS Tool ──> Agent
-    │
-    ▼
-   END
+```
+app/
+├── agent.py              ← Main entry point (CrewAI)
+├── crew.py               ← CrewAI agents, tasks, and crew definition
+├── multi_agent_run.py    ← Alternative entry with custom query support
+├── config.py             ← Settings + environment configuration
+├── requirements.txt      ← Python dependencies (includes crewai)
+├── .env.example          ← Template for environment variables
+├── tools/                ← All agent tools (reused from LangChain @tool)
+│   ├── aws_tools.py      ← EC2 health check
+│   ├── github_tools.py   ← GitHub Actions status
+│   ├── k8s_tools.py      ← Pod/node/deployment health
+│   ├── deploy_tools.py   ← Rollout status, rollback, restart
+│   ├── incident_tools.py ← Crash logs, events, diagnosis
+│   ├── cost_tools.py     ← Idle instances, EBS waste, spend
+│   └── migration_tools.py← Jenkinsfile → GHA conversion
+├── web/
+│   └── app.py            ← FastAPI web dashboard
+└── graph/                ← (DEPRECATED) Old LangGraph implementation
+    ├── workflow.py        ← Single-agent LangGraph (still works)
+    └── multi_agent.py    ← Old supervisor pattern (replaced by crew.py)
 ```
 
 ---
 
-## LangSmith Trace Explanation
+## CrewAI Agents
 
-Each transaction trace block in LangSmith represents one explicit graph execution frame:
-
-| Stage | Description |
-| :--- | :--- |
-| **User** | Initial system monitoring context request prompt. |
-| **AI** | LLM orchestrator core reasoning state. |
-| **Tool Call** | LLM structural request to execute an external tool. |
-| **Tool** | Python execution script executing live queries. |
-| **AI** | Model consuming and processing tool result arrays. |
-| **should_continue** | Conditional graph edge determining step directions. |
-| **END** | Workflow execution route finalized and closed. |
+| Agent | Role | Tools |
+|-------|------|-------|
+| **K8s Agent** | Kubernetes Specialist | pod health, node health, deployments, crash logs, events, diagnosis |
+| **AWS Agent** | AWS Infrastructure Specialist | EC2 health, GitHub Actions status |
+| **Deploy Agent** | Deployment Specialist | rollout status, rollback, restart, history |
+| **Cost Agent** | Cost Optimization Specialist | idle instances, unattached EBS, cost summary |
+| **Incident Agent** | Incident Response Specialist | crash logs, cluster events, pod diagnosis |
+| **Migration Agent** | CI/CD Migration Specialist | Jenkinsfile conversion, complexity analysis |
 
 ---
 
-## Key Benefits of LangGraph
-- **Deterministic Control Workflows:** Guarantees strict loop routing paths.
-- **Dynamic Tool Selection:** Models determine vectors at run-time based on state data.
-- **Stateful Conversations:** Appends chat logs natively using custom channel reducers.
-- **Modular Integration:** New DevOps vectors can be appended as standard functions.
-- **Streamlined Debugging:** Out-of-the-box system tracing and logging via LangSmith.
-- **Human-in-the-Loop Capable:** Supports workflow interrupts for authorization check gates.
+## How CrewAI Works Here
+
+1. **User sends query** (or default health check runs)
+2. **Manager agent** (auto-created by CrewAI hierarchical process) reads the tasks
+3. Manager **delegates** each task to the most appropriate specialist agent
+4. Each agent uses its **tools** (kubectl, boto3, GitHub API) to gather data
+5. Agent returns findings to the manager
+6. Manager produces a **final consolidated report**
 
 ---
 
-## Current Tool Matrix Implementation
+## Configuration
 
-| Category | Tool | What it does |
-| :--- | :--- | :--- |
-| **AWS** | `check_aws_ec2_health()` | Finds EC2 instances that are not running/healthy |
-| **GitHub** | `check_github_workflow_status(repo)` | Checks last 10 workflow runs for failures |
-| **Kubernetes** | `check_k8s_pod_health(namespace)` | Finds pods NOT in Running/Completed state |
-| **Kubernetes** | `check_k8s_node_health()` | Finds nodes in NotReady state |
-| **Kubernetes** | `check_k8s_deployments(namespace)` | Finds deployments with missing replicas |
-| **Deployment** | `check_rollout_status(deployment, ns)` | Is rollout complete, progressing, or stuck? |
-| **Deployment** | `rollback_deployment(deployment, ns)` | Rolls back to previous version |
-| **Deployment** | `get_deployment_history(deployment, ns)` | Shows revision history |
-| **Deployment** | `restart_deployment(deployment, ns)` | Rolling restart (zero downtime) |
-| **Incident** | `get_pod_crash_logs(pod, ns)` | Gets logs from crashed container (--previous) |
-| **Incident** | `get_cluster_events(ns)` | Shows recent Warning events |
-| **Incident** | `diagnose_pod(pod, ns)` | Full diagnosis: status + exit code + events |
-| **Migration** | `convert_jenkinsfile_to_github_actions(content)` | Generates GHA YAML from Jenkinsfile |
-| **Migration** | `analyze_jenkinsfile_complexity(content)` | Determines Tier 1/2/3 migration effort |
-| **Cost** | `find_idle_ec2_instances()` | Finds instances with < 5% CPU (wasting money) |
-| **Cost** | `find_unattached_ebs_volumes()` | Finds EBS volumes not attached to anything |
-| **Cost** | `get_cost_summary()` | Current month AWS spend by service |
+### .env Variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `GROQ_API_KEY` | Groq API key (free tier works) | `gsk_abc123...` |
+| `CREWAI_LLM` | LLM model in LiteLLM format | `groq/llama-3.3-70b-versatile` |
+| `GITHUB_TOKEN` | GitHub PAT for API access | `ghp_abc123...` |
+| `TARGET_REPO` | Default repo to monitor | `ShivaKrishna44/devops-microservices-nojenkins` |
+| `AWS_ACCESS_KEY_ID` | AWS credentials | `AKIA...` |
+| `AWS_SECRET_ACCESS_KEY` | AWS credentials | `wJalr...` |
+| `AWS_DEFAULT_REGION` | AWS region | `us-east-1` |
+
+### Supported LLM Models (via Groq free tier)
+
+| Model | Speed | Quality |
+|-------|-------|---------|
+| `groq/llama-3.3-70b-versatile` | Fast | Best (recommended) |
+| `groq/mixtral-8x7b-32768` | Very fast | Good |
+| `groq/gemma2-9b-it` | Fastest | Basic |
+
+---
+
+## Tool Matrix
+
+| Category | Tool | Description |
+|----------|------|-------------|
+| **AWS** | `check_aws_ec2_health()` | Finds EC2 instances not running/healthy |
+| **GitHub** | `check_github_workflow_status(repo)` | Checks last 10 runs for failures |
+| **K8s** | `check_k8s_pod_health(namespace)` | Finds pods NOT Running/Completed |
+| **K8s** | `check_k8s_node_health()` | Finds NotReady nodes |
+| **K8s** | `check_k8s_deployments(namespace)` | Finds degraded deployments |
+| **Deploy** | `check_rollout_status(deploy, ns)` | Rollout complete/stuck? |
+| **Deploy** | `rollback_deployment(deploy, ns)` | Undo to previous version |
+| **Deploy** | `restart_deployment(deploy, ns)` | Rolling restart |
+| **Deploy** | `get_deployment_history(deploy, ns)` | Revision history |
+| **Incident** | `get_pod_crash_logs(pod, ns)` | Previous container logs |
+| **Incident** | `get_cluster_events(ns)` | Warning events |
+| **Incident** | `diagnose_pod(pod, ns)` | Full pod diagnosis |
+| **Cost** | `find_idle_ec2_instances()` | CPU < 5% over 24h |
+| **Cost** | `find_unattached_ebs_volumes()` | Orphaned volumes |
+| **Cost** | `get_cost_summary()` | Monthly spend by service |
+| **Migration** | `convert_jenkinsfile_to_github_actions(content)` | Generate GHA YAML |
+| **Migration** | `analyze_jenkinsfile_complexity(content)` | Tier 1/2/3 assessment |

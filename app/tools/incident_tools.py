@@ -1,6 +1,6 @@
 """Incident response tools — diagnose issues, check events, get crash logs."""
 import subprocess
-from langchain_core.tools import tool
+from crewai.tools import tool
 from config import logger
 
 
@@ -23,7 +23,7 @@ def _run_kubectl(cmd: str) -> str:
         return f"kubectl failed: {e}"
 
 
-@tool
+@tool("Get Pod Crash Logs")
 def get_pod_crash_logs(pod_name: str, namespace: str = "default") -> str:
     """Gets logs from a crashed/restarting pod (previous container). Useful for diagnosing CrashLoopBackOff."""
     logger.info("Getting crash logs for pod: %s in %s", pod_name, namespace)
@@ -40,7 +40,7 @@ def get_pod_crash_logs(pod_name: str, namespace: str = "default") -> str:
     return f"Crash logs for '{pod_name}':\n{output[-2000:]}"  # Limit to 2000 chars
 
 
-@tool
+@tool("Get Cluster Events")
 def get_cluster_events(namespace: str = "default") -> str:
     """Gets recent Kubernetes events — shows scheduling failures, pull errors, OOM kills, etc."""
     logger.info("Getting cluster events in namespace: %s", namespace)
@@ -58,7 +58,7 @@ def get_cluster_events(namespace: str = "default") -> str:
     return f"Recent warning events in '{namespace}':\n{recent}"
 
 
-@tool
+@tool("Diagnose Pod")
 def diagnose_pod(pod_name: str, namespace: str = "default") -> str:
     """Runs full diagnosis on a pod: status, events, exit code, resource usage."""
     logger.info("Diagnosing pod: %s in %s", pod_name, namespace)

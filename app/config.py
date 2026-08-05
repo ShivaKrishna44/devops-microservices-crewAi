@@ -29,5 +29,10 @@ class Settings:
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b")
     TARGET_REPO: str = os.getenv("TARGET_REPO", "ShivaKrishna44/devops-microservices-nojenkins")
+    # CrewAI uses OPENAI_API_KEY env var for LLM. We map Groq through it.
+    CREWAI_LLM: str = os.getenv("CREWAI_LLM", "groq/llama-3.3-70b-versatile")
 
 settings = Settings()
+
+# ── Set env vars that CrewAI/LiteLLM expects ─────────────────────────────────
+os.environ["GROQ_API_KEY"] = settings.GROQ_API_KEY
