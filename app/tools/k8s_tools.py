@@ -53,7 +53,7 @@ def check_k8s_pod_health(namespace: str = "default") -> str:
 
 
 @tool("Check K8s Node Health")
-def check_k8s_node_health() -> str:
+def check_k8s_node_health(cluster: str = "default") -> str:
     """Checks Kubernetes node health. Finds nodes that are NotReady or have resource pressure."""
     logger.info("Checking K8s node health...")
 

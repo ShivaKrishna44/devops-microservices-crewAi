@@ -4,7 +4,7 @@ from config import settings, logger
 
 
 @tool("Check AWS EC2 Health")
-def check_aws_ec2_health() -> str:
+def check_aws_ec2_health(region: str = "us-east-1") -> str:
     """Queries AWS to check for any EC2 instances that are not healthy or running."""
     logger.info("Running AWS EC2 health scan...")
     try:

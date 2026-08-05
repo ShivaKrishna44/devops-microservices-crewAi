@@ -187,3 +187,4 @@ ArgoCD syncs: deploys new image to EKS
 | Code Quality        | SonarQube                         |
 | Progressive Delivery| Argo Rollouts                     |
 | AI Monitoring       | MCP Server (custom)               |
+| AI Multi-Agent      | CrewAI (hierarchical process)     |

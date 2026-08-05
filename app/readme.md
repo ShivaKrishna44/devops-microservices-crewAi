@@ -43,26 +43,167 @@ This project uses **CrewAI** with a **hierarchical process** (manager agent auto
 
 ---
 
-## Quick Start
+## Setup Guide (Step-by-Step)
+
+### Prerequisites
+- **Python 3.10 to 3.13** (CrewAI does NOT support Python 3.14)
+- **Git Bash** or **CMD** on Windows
+- **AWS CLI** configured (for EKS/EC2 checks)
+- **kubectl** configured (for K8s checks)
+- **Groq API key** (free at https://console.groq.com)
+- **GitHub PAT** (for workflow status checks)
+
+### Step 1: Check Python Version
 
 ```bash
-# 1. Install dependencies
-cd app
+py -0          # Lists all installed Python versions
+```
+
+You need Python 3.10–3.13. If you only have 3.14, install 3.12 or 3.13 from python.org.
+
+### Step 2: Create Virtual Environment (MUST be Python ≤3.13)
+
+```bash
+cd C:\Devops\Repository\devops-microservices-crewAi\app
+
+# Delete old venv if exists
+rm -rf venv                          # Git Bash
+# OR: rmdir /s /q venv               # CMD
+
+# Create with Python 3.13 (adjust path if needed)
+py -3.13 -m venv venv
+```
+
+### Step 3: Activate venv
+
+**Important**: In Git Bash, `activate.bat` does NOT work. Use:
+
+```bash
+# Git Bash — use source:
+source venv/Scripts/activate
+
+# CMD — use .bat:
+venv\Scripts\activate.bat
+```
+
+**Verify** it's the right Python:
+```bash
+python --version   # Must say 3.13.x, NOT 3.14
+```
+
+If `python --version` still shows 3.14 (venv activation not working in Git Bash),
+use the venv python directly for ALL commands:
+
+```bash
+venv/Scripts/python.exe --version    # This ALWAYS uses the venv
+```
+
+### Step 4: Install Dependencies
+
+```bash
+# If activation worked:
+pip install --upgrade pip
 pip install -r requirements.txt
 
-# 2. Copy .env and fill in your keys
+# If activation didn't work (Git Bash issues), use direct path:
+venv/Scripts/python.exe -m pip install --upgrade pip
+venv/Scripts/python.exe -m pip install -r requirements.txt
+```
+
+### Step 5: Configure Environment Variables
+
+```bash
 cp .env.example .env
+```
 
-# 3. Run full health check
-python agent.py
+Edit `.env` with your actual keys:
 
-# 4. Run with custom query
-python agent.py "check kubernetes pods in order-service namespace"
-python agent.py "find cost waste"
-python agent.py "convert Jenkinsfile to GitHub Actions"
+```env
+GROQ_API_KEY=gsk_your_key_here
+CREWAI_LLM=groq/llama-3.1-8b-instant
+GITHUB_TOKEN=ghp_your_token_here
+AWS_ACCESS_KEY_ID=AKIA_your_key
+AWS_SECRET_ACCESS_KEY=your_secret
+AWS_DEFAULT_REGION=us-east-1
+TARGET_REPO=YourOrg/your-repo-name
 
-# 5. Run web dashboard
-uvicorn web.app:app --reload --port 8000
+# Tracing (get API key from app.crewai.com → Settings → Personal Access Token)
+CREWAI_TRACING_ENABLED=true
+CREWAI_API_KEY=your-crewai-personal-access-token
+```
+
+### Step 6: Connect to EKS Cluster (for K8s checks)
+
+```bash
+aws eks update-kubeconfig --name expense-dev --region us-east-1
+kubectl get nodes   # Verify connection
+```
+
+### Step 7: Run the Agent
+
+```bash
+# Full health check:
+venv/Scripts/python.exe agent.py
+
+# Custom query:
+venv/Scripts/python.exe agent.py "check kubernetes pods"
+venv/Scripts/python.exe agent.py "find cost waste"
+venv/Scripts/python.exe agent.py "check GitHub Actions status"
+```
+
+### Step 8: Run Web Dashboard
+
+```bash
+venv/Scripts/python.exe -m uvicorn web.app:app --reload --port 8000
+```
+
+Open: http://localhost:8000
+
+### Step 9: View Traces
+
+Go to: https://app.crewai.com → **Traces** (left sidebar)
+
+---
+
+## Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| `No matching distribution found for crewai` | Python 3.14 (unsupported) | Use Python 3.13 venv |
+| `python --version` shows 3.14 after activate | Git Bash activation issue | Use `venv/Scripts/python.exe` directly |
+| `cache_breakpoint is unsupported` | Groq doesn't support CrewAI cache params | `litellm_patch.py` handles this (already included) |
+| `enable_cache is unsupported` | Same issue, different param | Remove `enable_cache` from LLM config |
+| `'required' present but 'properties' is missing` | Groq rejects tools with no parameters | Add a dummy param with default value to all no-arg tools |
+| `Rate limit reached` (TPM 12000) | Groq free tier limit | Wait 3s between runs, or use `groq/llama-3.1-8b-instant` (smaller) |
+| `kubectl error: no such host` | EKS cluster unreachable | Run `aws eks update-kubeconfig --name <cluster> --region <region>` |
+| `conflicting dependencies` (httpx) | `langchain-groq` conflicts with crewai | Remove `langchain-groq` from requirements (not needed) |
+| `UnicodeEncodeError` in CLI | Windows cp1252 encoding | Set `PYTHONUTF8=1` or use CMD instead of Git Bash |
+| Traces empty on app.crewai.com | No API key configured | Add `CREWAI_API_KEY` from Personal Access Token in settings |
+
+---
+
+## Key Lessons Learned
+
+1. **CrewAI requires Python <3.14** — always create a venv with 3.13 or 3.12
+2. **Git Bash venv activation is unreliable** — use `venv/Scripts/python.exe` directly
+3. **Groq + CrewAI needs a monkey patch** — `litellm_patch.py` strips unsupported params
+4. **All tools MUST have at least one parameter** — Groq rejects empty tool schemas
+5. **Use `@tool("Tool Name")` from `crewai.tools`** — not `langchain_core.tools`
+6. **`crewai[litellm]` extra is required** for non-native LLM providers like Groq
+7. **Free Groq tier = 12K TPM** — use smaller models or add delays for multi-agent runs
+
+---
+
+## Quick Start (TL;DR)
+
+```bash
+cd C:\Devops\Repository\devops-microservices-crewAi\app
+py -3.13 -m venv venv
+venv/Scripts/python.exe -m pip install -r requirements.txt
+# Edit .env with your keys
+venv/Scripts/python.exe agent.py "check kubernetes pods"
+# Web UI:
+venv/Scripts/python.exe -m uvicorn web.app:app --reload --port 8000
 ```
 
 ---

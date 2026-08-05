@@ -41,3 +41,5 @@ docker/
 # Empty/unused folders
 kubernetes/jenkins/
 kubernetes/namespaces/
+kubectl.exe
+helm.exe

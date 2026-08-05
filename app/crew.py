@@ -17,7 +17,11 @@ Usage:
     result = run_devops_crew("check kubernetes pods in all namespaces")
 """
 
-from crewai import Agent, Task, Crew, Process
+from crewai import Agent, Task, Crew, Process, LLM
+
+# Apply Groq compatibility patch BEFORE any CrewAI LLM calls
+from litellm_patch import apply_patch
+apply_patch()
 
 from config import settings, logger
 from tools.aws_tools import check_aws_ec2_health
@@ -33,7 +37,10 @@ from tools.migration_tools import convert_jenkinsfile_to_github_actions, analyze
 # Agent Definitions
 # ═══════════════════════════════════════════════════════
 
-LLM_MODEL = settings.CREWAI_LLM
+LLM_MODEL = LLM(
+    model=settings.CREWAI_LLM,
+    temperature=0,
+)
 
 
 k8s_agent = Agent(
@@ -211,7 +218,8 @@ def build_devops_crew(tasks: list[Task]) -> Crew:
         process=Process.hierarchical,
         manager_llm=LLM_MODEL,
         verbose=True,
-        memory=False,  # Disable for speed; enable for multi-run context
+        memory=False,
+        tracing=True,
     )
 
 

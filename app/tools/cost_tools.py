@@ -23,7 +23,7 @@ def _get_cloudwatch_client():
 
 
 @tool("Find Idle EC2 Instances")
-def find_idle_ec2_instances() -> str:
+def find_idle_ec2_instances(region: str = "us-east-1") -> str:
     """Finds EC2 instances that are running but have very low CPU usage (potential cost waste).
     Checks instances with < 5% average CPU over last 24 hours."""
     logger.info("Scanning for idle EC2 instances...")
@@ -85,7 +85,7 @@ def find_idle_ec2_instances() -> str:
 
 
 @tool("Find Unattached EBS Volumes")
-def find_unattached_ebs_volumes() -> str:
+def find_unattached_ebs_volumes(region: str = "us-east-1") -> str:
     """Finds EBS volumes that are not attached to any instance (wasting money doing nothing)."""
     logger.info("Scanning for unattached EBS volumes...")
 
@@ -120,7 +120,7 @@ def find_unattached_ebs_volumes() -> str:
 
 
 @tool("Get AWS Cost Summary")
-def get_cost_summary() -> str:
+def get_cost_summary(region: str = "us-east-1") -> str:
     """Gets a quick AWS cost summary for the current month using Cost Explorer."""
     logger.info("Getting AWS cost summary...")
 
