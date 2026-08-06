@@ -28,7 +28,7 @@ class Settings:
     GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", "")
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b")
-    TARGET_REPO: str = os.getenv("TARGET_REPO", "ShivaKrishna44/devops-microservices-nojenkins")
+    TARGET_REPO: str = os.getenv("TARGET_REPO", "ShivaKrishna44/devops-microservices-crewAi")
     # CrewAI uses OPENAI_API_KEY env var for LLM. We map Groq through it.
     CREWAI_LLM: str = os.getenv("CREWAI_LLM", "groq/llama-3.3-70b-versatile")
 
