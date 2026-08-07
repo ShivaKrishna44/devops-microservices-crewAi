@@ -43,3 +43,4 @@ kubernetes/jenkins/
 kubernetes/namespaces/
 kubectl.exe
 helm.exe
+.kiro/
