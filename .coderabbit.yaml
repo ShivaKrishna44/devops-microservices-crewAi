@@ -1,0 +1,46 @@
+# CodeRabbit Configuration
+# AI-powered code review for every Pull Request
+# Docs: https://docs.coderabbit.ai
+
+language: en-US
+
+reviews:
+  # Enable auto-review on all PRs
+  auto_review:
+    enabled: true
+    drafts: false  # Don't review draft PRs
+
+  # Review profile (assertive catches more issues)
+  profile: assertive
+
+  # What to focus on
+  path_instructions:
+    - path: "app/crew.py"
+      instructions: "Focus on CrewAI best practices, agent configuration, and task design"
+    - path: "app/tools/**"
+      instructions: "Check for proper error handling, timeout usage, and security (no hardcoded secrets)"
+    - path: "Terraform/**"
+      instructions: "Check for security misconfigurations, missing encryption, overly permissive IAM policies"
+    - path: ".github/workflows/**"
+      instructions: "Check for pinned action versions, secret handling, and OIDC usage"
+    - path: "kubernetes/**"
+      instructions: "Check for resource limits, security context, and network policies"
+
+  # Request changes vs comments
+  request_changes_workflow: true
+
+  # High-level summary in PR
+  high_level_summary: true
+  high_level_summary_placeholder: "@coderabbitai summary"
+
+  # Poem at the end (fun touch)
+  poem: true
+
+chat:
+  # Allow developers to chat with CodeRabbit in PR comments
+  auto_reply: true
+
+knowledge_base:
+  # Learn from past reviews
+  learnings:
+    scope: auto
