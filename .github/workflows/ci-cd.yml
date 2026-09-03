@@ -26,8 +26,8 @@ on:
 
 # OIDC — required for aws-actions/configure-aws-credentials with role
 permissions:
-  id-token: write
-  contents: write
+  id-token: write # Required for requesting the JWT token
+  contents: write # Required for actions/checkout
 
 env:
   AWS_REGION: us-east-1
