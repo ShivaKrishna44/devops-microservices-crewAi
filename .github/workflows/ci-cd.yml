@@ -29,12 +29,11 @@ permissions:
   id-token: write # Required for requesting the JWT token
   contents: write # Required for actions/checkout
 
- env:
-   uses: aws-actions/configure-aws-credentials@v4
-   AWS_REGION: us-east-1
-   AWS_ROLE_ARN: arn:aws:iam::589389425618:role/github-actions-admin-role
-   EKS_CLUSTER_NAME: expense-dev
-   ECR_REGISTRY: 589389425618.dkr.ecr.us-east-1.amazonaws.com
+env:
+  AWS_REGION: us-east-1
+  AWS_ROLE_ARN: arn:aws:iam::589389425618:role/github-actions-admin-role
+  EKS_CLUSTER_NAME: expense-dev
+  ECR_REGISTRY: 589389425618.dkr.ecr.us-east-1.amazonaws.com
 
 jobs:
   # ==========================================
