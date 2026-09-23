@@ -1,7 +1,12 @@
-crewai[litellm]>=1.15.0
-crewai-tools>=0.40.0
-python-dotenv>=1.2.2
-boto3>=1.38.0
-PyGithub>=2.6.0
-fastapi>=0.115.0
-uvicorn>=0.32.0
+crewai>=3.14
+python-dotenv>=1.0.0
+# AWS CLI, kubectl, and terraform are expected to be installed and on PATH,
+# and AWS credentials configured (env vars, profile, or IRSA/instance role).
+#
+# NOTE: crewai supports Python >=3.10,<3.14. You are on Python 3.14, which is
+# OUTSIDE that range — crewai will NOT install on 3.14. To run the live agent,
+# use a Python 3.11/3.12 venv:
+#     py -3.12 -m venv venv
+#     venv\Scripts\activate
+#     pip install -r requirements.txt
+# (The unit tests in tests/ run fine on 3.14 without crewai via the tool shim.)

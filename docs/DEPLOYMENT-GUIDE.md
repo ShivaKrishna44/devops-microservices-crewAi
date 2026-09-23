@@ -1,1104 +1,249 @@
-# DevOps Microservices Platform — Complete Deployment Guide
+# Deployment & Operations Guide — EKS Upgrade by Agent
+# guarded-eks-upgrade-agent — Deployment & Operations Guide
 
-## GitHub Actions CI + ArgoCD GitOps CD — No Jenkins
+How to deploy and operate the human-approved EKS upgrade agent. The agent takes
+a **target Kubernetes version from a human**, runs read-only pre-checks, enforces
+**deterministic guardrails**, requires **explicit human approval** (two-person for
+prod), and only then performs the upgrade via Terraform — with post-upgrade
+validation.
 
----
-
-## Architecture Overview
-
-```
-┌──────────────────────────────────────────────────-────────────────────────┐
-│                                                                           │
-│  Developer → git push → GitHub                                            │
-│                              ↓                                            │
-│  ┌───────────────────────────────────────────────────-─┐                  │
-│  │  GitHub Actions (CI)                                │                  │
-│  │  ├── Detect changed service (paths-filter)          │                  │
-│  │  ├── Build Docker image                             │                  │
-│  │  ├── Push to AWS ECR                                │                  │
-│  │  └── Update image tag in Helm values → git push     │                  │
-│  └───────────────────────────────────────────────────-─┘                  │
-│                              ↓                                            │
-│  ┌──────────────────────────────────────────────────-──┐                  │
-│  │  ArgoCD (CD — GitOps, runs inside EKS)              │                  │
-│  │  ├── Polls GitHub every 3 min                       │                  │
-│  │  ├── Detects image tag change in Helm values        │                  │
-│  │  └── Auto-syncs deployment to EKS                   │                  │
-│  └─────────────────────────────────────────────────-───┘                  │
-│                              ↓                                            │
-│  ┌──────────────────────────────────────-──────────────┐                  │
-│  │  AWS EKS Cluster (expense-dev)                      │                  │
-│  │  ├── order-service   (namespace: order-service)     │                  │
-│  │  ├── payment-service (namespace: payment-service)   │                  │
-│  │  ├── user-service    (namespace: user-service)      │                  │
-│  │  ├── monitoring      (Prometheus + Grafana)         │                  │
-│  │  ├── sonarqube       (Code quality)                 │                  │
-│  │  └── argo-rollouts   (Canary/Blue-Green)            │                  │
-│  └──────────────────────────────────────────────-──────┘                  │
-│                                                                           │
-│  Infrastructure managed by: Terraform                                     │
-│  DNS: Route53 → ALB → EKS pods                                            │
-│  Certs: ACM wildcard (*.vosukula.online)                                  │
-│                                                                           │
-└──────────────────────────────────────────────────────────────────-────────┘
-```
+> Config values below use placeholders. Replace `<AWS_ACCOUNT_ID>`,
+> `<AWS_REGION>`, and `<CLUSTER_NAME>` with your own. Never commit real account
+> IDs, keys, or `.env`.
 
 ---
 
-## Platform Components
+## Architecture
 
-| Component          | Tool                       | URL                             |
-|--------------------|----------------------------|---------------------------------|
-| Infrastructure     | Terraform + AWS EKS        |  —                              |
-| CI (Build)         | GitHub Actions             | GitHub → Actions tab            |
-| CD (Deploy)        | ArgoCD (GitOps)            | https://argocd.vosukula.online  |
-| Monitoring         | Prometheus + Grafana       | https://grafana.vosukula.online |
-| Code Quality       | SonarQube                  | https://sonar.vosukula.online   |
-| App                | Python Flask microservices | https://app.vosukula.online     |
-| Registry           | AWS ECR                    | us-east-1                       |
-| Progressive Delivery| Argo Rollouts             | Canary/Blue-Green               |
-
-**Key Config:**
-- AWS Account: `589389425618`
-- Region: `us-east-1`
-- EKS Cluster: `expense-dev`
-- Domain: `vosukula.online`
-- ACM Wildcard Cert: `arn:aws:acm:us-east-1:589389425618:certificate/483235ba-eb66-4a81-b2ab-6244c3f2a2d6`
-
----
-
-## Full Setup — Step by Step
-
-### Step 1: Terraform Infrastructure (15 min)
-
-```bash
-cd Terraform
-terraform init -backend-config=tfvars/dev/backend.tfvars
-terraform plan -var-file=tfvars/dev/dev.tfvars
-terraform apply -var-file=tfvars/dev/dev.tfvars
 ```
-
-**What this creates:**
-- VPC with public/private/database subnets
-- EKS cluster `expense-dev` (Kubernetes 1.33)
-- ECR repositories: order-service, payment-service, user-service
-- IAM roles: node group, EBS CSI, ALB controller
-- S3 backend + DynamoDB state locking
-
----
-
-### Step 2: Configure kubectl (2 min)
-
-```bash
-bash scripts/01-install-tools.sh
-```
-
-Or manually:
-```bash
-aws eks update-kubeconfig --name expense-dev --region us-east-1
-kubectl get nodes
-# Should show 2 nodes in Ready state
+Human provides target version (e.g. 1.34)
+          │
+          ▼
+ ┌─────────────────────┐   read-only
+ │ Pre-Check Agent      │   aws eks / kubectl / addon + node checks
+ └─────────┬───────────┘
+           ▼
+ ┌─────────────────────┐   read-only
+ │ Upgrade Planner      │   terraform plan  → GO/NO-GO
+ └─────────┬───────────┘
+           ▼
+ ╔═════════════════════╗   deterministic guardrails (non-LLM)
+ ║ GUARDRAILS           ║   single-minor rule · cluster-name · region · verdict
+ ╚═════════┬═══════════╝
+           ▼
+ ╔═════════════════════╗   HUMAN GATE (typed cluster name + APPROVE;
+ ║ APPROVAL GATE        ║   two-person for prod; evidence-hash bound; TTL)
+ ╚═════════┬═══════════╝
+           ▼ (only if APPROVED)
+ ┌─────────────────────┐   terraform apply (control plane → node groups)
+ │ Executor Agent       │   refuses without a valid approval record
+ └─────────┬───────────┘
+           ▼
+ ┌─────────────────────┐   read-only
+ │ Post-Upgrade Validator│  version + node/pod health → PASS/FAIL
+ └─────────────────────┘
 ```
 
 ---
 
-### Step 3: Install AWS Load Balancer Controller (3 min)
+## Prerequisites
 
-```bash
-bash scripts/02-install-alb-controller.sh
-```
-
-Verify:
-```bash
-kubectl get pods -n kube-system | grep aws-load-balancer
-# Should show 2 pods Running
-```
-
----
-
-### Step 4: Install ArgoCD (3 min)
-
-```bash
-bash scripts/04-install-argocd.sh
-```
-
-**What this does:**
-- Creates `argocd` namespace
-- Installs ArgoCD using `--server-side` (required for large CRDs)
-- Applies ArgoCD ingress
-
-**Get admin password:**
-```bash
-kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath="{.data.password}" | base64 -d
-```
-
-**Access:** https://argocd.vosukula.online  
-**Username:** `admin`  
-**Password:** from command above
+| Requirement | Notes |
+|-------------|-------|
+| Python 3.12+ | for the agent (`app/`) |
+| `terraform` on PATH | drives the actual upgrade |
+| `aws` CLI + credentials | prefer a profile / IRSA / instance role over static keys |
+| `kubectl` on PATH | pre-check + validation |
+| An existing EKS cluster managed by Terraform | with an `eks_version` variable |
+| An LLM key | e.g. `OPENROUTER_API_KEY` for `openrouter/openrouter/free` |
 
 ---
 
-### Step 5: Install Monitoring — Prometheus + Grafana (5 min)
+## 1. Install
 
 ```bash
-# Create namespace + secret FIRST
-kubectl create namespace monitoring
-kubectl create secret generic grafana-admin-secret \
-  --from-literal=admin-user=admin \
-  --from-literal=admin-password=YOUR_PASSWORD \
-  -n monitoring
-
-# Install
-bash scripts/05-install-monitoring.sh
-
-# Apply ingress
-kubectl apply -f kubernetes/ingress/grafana-ingress.yaml
+cd app
+python -m venv venv
+# Windows: venv\Scripts\activate   |   Linux/Mac: source venv/bin/activate
+pip install -r requirements.txt
 ```
 
-**Access:** https://grafana.vosukula.online  
-**Username:** `admin`  
-**Password:** what you set above
+## 2. Configure
 
-**Recommended Dashboards (import by ID):**
-| ID      | Name                          |
-|---------|-------------------------------|
-| `15760` | Kubernetes Cluster Monitoring |
-| `13770` | Kubernetes Pod Metrics        |
-| `12006` | Kubernetes Deployment Metrics |
+```bash
+cp .env.example .env
+# edit .env
+```
+
+Key settings (see `app/.env.example` for the full list):
+
+```bash
+CREWAI_LLM=openrouter/openrouter/free
+OPENROUTER_API_KEY=<your-key>
+
+EKS_CLUSTER_NAME=<CLUSTER_NAME>
+AWS_REGION=<AWS_REGION>
+
+# Path to the Terraform dir that manages the cluster (has eks_version var).
+# Defaults to ../Terraform relative to app/.
+# TERRAFORM_DIR=/abs/path/to/Terraform
+
+# Guardrail / approval policy
+APPROVAL_TTL_MINUTES=60
+ALLOWED_REGIONS=<AWS_REGION>
+PROD_CLUSTER_MARKERS=prod,production,live
+REQUIRE_TWO_PERSON_FOR_PROD=true
+```
+
+## 3. Verify the safety logic (no AWS needed)
+
+```bash
+# from repo root
+pip install pytest
+python -m pytest tests/ -v
+```
+
+These tests cover the guardrails and approval gate (single-minor rule, wrong
+cluster, region allow-list, evidence-hash drift, two-person, TTL expiry) without
+touching AWS. Run them before trusting the tool.
 
 ---
 
-### Step 6: Install SonarQube — Optional (5 min)
+## 4. Run an upgrade (local, interactive)
 
 ```bash
-bash scripts/06-install-sonarqube.sh
-kubectl apply -f kubernetes/ingress/sonarqube-ingress.yaml
+cd app
+python main.py --target-version 1.34
 ```
 
-**Access:** https://sonar.vosukula.online  
-**Default login:** `admin` / `admin`
+Flow:
+1. Read-only pre-checks + `terraform plan` print evidence.
+2. You type the exact cluster name to confirm; guardrails run.
+3. You type `APPROVE` (agents cannot self-approve).
+4. Apply:
+   ```bash
+   python main.py --apply --target-version 1.34
+   ```
+5. Post-upgrade validation prints PASS/FAIL.
+
+Utility commands:
+```bash
+python main.py --status     # show gate state + who approved
+python main.py --reset      # clear the current decision (history kept)
+```
+
+## 5. Two-person approval (production)
+
+```bash
+# 1) first approver opens the request (runs pre-checks + guardrails)
+python main.py --target-version 1.34 --actor alice
+
+# 2) a DISTINCT second approver (re-runs pre-check, hash-verified)
+python main.py --target-version 1.34 --actor bob --approve
+
+# 3) apply once status is APPROVED (2/2)
+python main.py --apply --target-version 1.34
+```
+
+Production clusters (name contains a `PROD_CLUSTER_MARKERS` substring) require
+two distinct approvers. The same person cannot approve twice.
 
 ---
 
-### Step 7: Install Argo Rollouts (2 min)
+## 6. CI/CD with human approval (GitHub Actions)
 
-```bash
-bash scripts/07-install-argo-rollouts.sh
-kubectl get pods -n argo-rollouts
-```
+Workflow: `.github/workflows/eks-upgrade.yml`
 
-Enables canary and blue-green deployment strategies.
+Two jobs:
+1. **`precheck-plan`** — read-only pre-checks + `terraform plan`. Always safe.
+2. **`apply`** — gated behind the `production-eks-upgrade` **GitHub Environment**.
+   Pauses until a **required reviewer approves**, then applies.
 
----
+### One-time setup
 
-### Step 8: Configure GitHub Actions + OIDC (5 min)
+**a. AWS OIDC role** (no static keys in CI). In IAM:
+- Add identity provider `token.actions.githubusercontent.com` (audience `sts.amazonaws.com`).
+- Create a role whose trust policy allows this repo:
+  ```json
+  "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+  "token.actions.githubusercontent.com:sub": "repo:<OWNER>/<REPO>:*"
+  ```
+- Grant it only what an upgrade needs (EKS + the Terraform backend). Avoid `AdministratorAccess`.
 
-#### 8a. Setup AWS OIDC for GitHub (one-time, already done)
+**b. GitHub repo config** (Settings → Secrets and variables → Actions):
+- Variables: `AWS_ROLE_ARN`, `AWS_REGION`, `EKS_CLUSTER_NAME`, `CREWAI_LLM`
+- Secrets: `OPENROUTER_API_KEY`
 
-GitHub Actions authenticates to AWS using OIDC — no access keys needed.
+**c. Approval environment** (Settings → Environments):
+- Create `production-eks-upgrade` → add **Required reviewers**. This reviewer
+  approval is the human-in-the-loop gate in CI.
 
-**What was configured in AWS Console:**
-1. IAM → Identity Providers → Added `token.actions.githubusercontent.com` (OpenID Connect)
-2. IAM → Roles → Created `github-actions-admin-role` with:
-   - Trust policy: allows only `repo:ShivaKrishna44/devops-microservices-nojenkins:*`
-   - Permissions: `AdministratorAccess` (scope down for production)
+### Trigger
 
-**Nothing to configure in GitHub** — the workflow file handles it with:
-```yaml
-permissions:
-  id-token: write   # Allows OIDC token request
-  contents: write   # Allows git push
-
-- uses: aws-actions/configure-aws-credentials@v4
-  with:
-    role-to-assume: arn:aws:iam::589389425618:role/github-actions-admin-role
-    aws-region: us-east-1
-```
-
-**Role ARN:** `arn:aws:iam::589389425618:role/github-actions-admin-role`
-
-See `OIDC-SETUP.md` for full details and troubleshooting.
-
-#### 8b. Apply ArgoCD Applications
-
-```bash
-kubectl apply -f kubernetes/argocd/apps/
-```
-
-Verify:
-```bash
-kubectl get applications -n argocd
-# NAME              SYNC STATUS   HEALTH STATUS
-# order-service     Synced        Healthy
-# payment-service   Synced        Healthy
-# user-service      Synced        Healthy
-```
-
-#### 8c. First Deploy — Build & Push Images (one-time bootstrap)
-
-⚠️ ArgoCD applications will show `Degraded` until images exist in ECR. This step creates the first images.
-
-**Login to ECR:**
-```bash
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 589389425618.dkr.ecr.us-east-1.amazonaws.com
-```
-
-**Build + push all 3 services:**
-```bash
-# Order service
-docker build -t order-service:v1 ./app/order-service/
-docker tag order-service:v1 589389425618.dkr.ecr.us-east-1.amazonaws.com/order-service:v1
-docker push 589389425618.dkr.ecr.us-east-1.amazonaws.com/order-service:v1
-
-# Payment service
-docker build -t payment-service:v1 ./app/payment-service/
-docker tag payment-service:v1 589389425618.dkr.ecr.us-east-1.amazonaws.com/payment-service:v1
-docker push 589389425618.dkr.ecr.us-east-1.amazonaws.com/payment-service:v1
-
-# User service
-docker build -t user-service:v1 ./app/user-service/
-docker tag user-service:v1 589389425618.dkr.ecr.us-east-1.amazonaws.com/user-service:v1
-docker push 589389425618.dkr.ecr.us-east-1.amazonaws.com/user-service:v1
-```
-
-**Update Helm values with tag `v1`:**
-```bash
-sed -i 's|tag:.*|tag: "v1"|' charts/microservice/values-order.yaml
-sed -i 's|tag:.*|tag: "v1"|' charts/microservice/values-payment.yaml
-sed -i 's|tag:.*|tag: "v1"|' charts/microservice/values-user.yaml
-```
-
-**Push to Git → ArgoCD auto-deploys:**
-```bash
-git add .
-git commit -m "deploy: all services v1"
-git push origin main
-```
-
-ArgoCD will detect the Helm values change and sync all 3 services to EKS.
-
-**Verify pods are running:**
-```bash
-kubectl get pods -n order-service
-kubectl get pods -n payment-service
-kubectl get pods -n user-service
-```
-
-**Alternative — deploy directly with Helm (bypasses ArgoCD, quicker for testing):**
-```bash
-./helm.exe upgrade --install order-service ./charts/microservice \
-  -f charts/microservice/values-order.yaml --set image.tag=v1 \
-  -n order-service --create-namespace
-
-./helm.exe upgrade --install payment-service ./charts/microservice \
-  -f charts/microservice/values-payment.yaml --set image.tag=v1 \
-  -n payment-service --create-namespace
-
-./helm.exe upgrade --install user-service ./charts/microservice \
-  -f charts/microservice/values-user.yaml --set image.tag=v1 \
-  -n user-service --create-namespace
-```
+Actions → **EKS Upgrade (Agent + Human Approval)** → Run workflow → enter target
+version. Review the plan in Job 1, approve the environment, Job 2 applies.
 
 ---
 
-#### 8d. Subsequent Deploys (after first time)
+## Guardrails & approval — what blocks what
 
-After the first deploy, all future deployments are automatic:
+| Layer | Mechanism | Blocks |
+|-------|-----------|--------|
+| Read-only agents | Pre-check/Planner/Validator have no write tools | any accidental change |
+| `single_minor_step` | version math | downgrade / no-op / skip / major change |
+| `cluster_name_confirmation` | typed name must match | wrong-cluster upgrades |
+| `region_allowlist` | `ALLOWED_REGIONS` | wrong region/account |
+| `precheck_verdict` | scans evidence | UNSAFE / NO-GO / no-compatible-addon |
+| Human gate | typed `APPROVE` (+ two-person for prod) | unattended / self-approved applies |
+| Evidence-hash bind | SHA-256 of reviewed plan | applying a plan that drifted since approval |
+| TTL | `APPROVAL_TTL_MINUTES` | stale approvals |
+| Gated executor | re-verifies the approval record | apply without a valid approval |
 
-**Option A — Push code (auto-trigger):**
-```bash
-# Change any file in app/order-service/
-git add . && git commit -m "update order service" && git push
-# GitHub Actions builds → pushes to ECR → updates Helm values → ArgoCD deploys
-```
-
-**Option B — Manual trigger:**
-- Go to: GitHub → Actions → "CI/CD Pipeline" → Run workflow
-- Select service name + tag → Run
-
----
-
-## How the CI/CD Pipeline Works
-
-### Pipeline File: `.github/workflows/ci-cd.yml`
-
-**Triggers:**
-| Trigger             | When                                     |
-|---------------------|------------------------------------------|
-| `push` to main      | When files in `app/` or `charts/` change |
-| `pull_request`      | Validates build on PR (no deploy)        |
-| `workflow_dispatch` | Manual — pick service + tag from UI      |
-
-**Auto-detect (smart builds):**
-- Uses `dorny/paths-filter` to detect which service changed
-- Only builds the service that was modified (not all 3)
-- Example: change `app/order-service/app.py` → only order-service builds
-
-**Pipeline stages:**
-```
-1. Detect Changes → which service folder changed?
-2. Configure AWS Credentials → from GitHub Secrets
-3. Login to ECR → temporary Docker auth token
-4. Build Docker Image → docker build ./app/<service>/
-5. Push to ECR → <account>.dkr.ecr.us-east-1.amazonaws.com/<service>:<tag>
-6. Update Helm Values → sed to update image tag in values file
-7. Commit & Push → triggers ArgoCD sync
-```
+Full detail: see the repo `README.md`.
 
 ---
 
-## How ArgoCD GitOps Works
+## Rollback reality (read before you run)
 
-**ArgoCD Application config (`kubernetes/argocd/apps/order-service.yaml`):**
-```yaml
-spec:
-  source:
-    repoURL: https://github.com/ShivaKrishna44/devops-microservices-platform.git
-    path: charts/microservice
-    helm:
-      valueFiles:
-        - values-order.yaml
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: order-service
-  syncPolicy:
-    automated:
-      prune: true       # Delete resources removed from Git
-      selfHeal: true    # Revert manual cluster changes
-    syncOptions:
-      - CreateNamespace=true
-```
+**EKS control-plane upgrades are NOT reversible.** You cannot downgrade a control
+plane. There is no "undo" for the version bump itself. What you *can* do:
 
-**What happens:**
-1. GitHub Actions updates `charts/microservice/values-order.yaml` with new tag
-2. ArgoCD polls Git every 3 minutes
-3. Detects the tag changed → triggers sync
-4. Applies Helm chart with new values → new pods with new image
-5. Old pods terminated → zero-downtime rolling update
+- **Node groups:** if node upgrades misbehave, you can roll worker nodes back to
+  the previous launch template / AMI while the control plane stays put.
+- **Workloads:** standard `kubectl rollout undo` for app deployments (unrelated
+  to the K8s version).
+- **The safe path is prevention:** the pre-checks (deprecated APIs, addon
+  compatibility) and the approval gate exist precisely because the version bump
+  can't be undone. Take them seriously.
 
-**Self-healing:** If someone manually changes something in the cluster, ArgoCD reverts it to match Git.
-
----
-
-## Helm Chart Structure
-
-```
-charts/microservice/
-├── Chart.yaml              ← Chart metadata
-├── values.yaml             ← Default values (shared)
-├── values-order.yaml       ← Order service overrides (image tag here)
-├── values-payment.yaml     ← Payment service overrides
-├── values-user.yaml        ← User service overrides
-└── templates/
-    ├── deployment.yaml     ← Pod spec
-    ├── service.yaml        ← ClusterIP service
-    ├── hpa.yaml            ← Horizontal Pod Autoscaler
-    ├── rollout.yaml        ← Argo Rollout (canary/blue-green)
-    ├── canary-service.yaml ← Canary traffic service
-    └── preview-service.yaml← Blue-green preview service
-```
-
-**Values file example (`values-order.yaml`):**
-```yaml
-image:
-  repository: 589389425618.dkr.ecr.us-east-1.amazonaws.com/order-service
-  tag: "latest12"
-```
-
-GitHub Actions updates `tag` → ArgoCD deploys new version.
-
----
-
-## Canary & Blue-Green Deployments (Argo Rollouts)
-
-### Enable Canary for a Service
-
-Edit `charts/microservice/values-order.yaml`:
-```yaml
-rollout:
-  enabled: true
-  strategy: canary
-  steps:
-    - setWeight: 20     # Send 20% traffic to new version
-    - pause: {duration: 60s}
-    - setWeight: 50
-    - pause: {duration: 60s}
-    - setWeight: 100    # Full rollout
-```
-
-### Monitor Rollout
-```bash
-kubectl argo rollouts get rollout order-service -n order-service --watch
-```
-
-### Promote (skip pause)
-```bash
-kubectl argo rollouts promote order-service -n order-service
-```
-
-### Abort (instant rollback)
-```bash
-kubectl argo rollouts abort order-service -n order-service
-```
-
----
-
-## Microservice Endpoints
-
-| Service          | Endpoint          | Returns                                               |
-|------------------|-------------------|-------------------------------------------------------|
-| order-service    | `GET /`           | `{"service": "order-service", "status": "running"}`   |
-| order-service    | `GET /orders`     | List of orders                                        |
-| payment-service  | `GET /`           | `{"service": "payment-service", "status": "running"}` |
-| payment-service  | `GET /payments`   | List of payments                                      |
-| user-service     | `GET /`           | `{"service": "user-service", "status": "running"}`    |
-| user-service     | `GET /users`      | List of users                                         |
-
-**Test via ingress:**
-```bash
-curl https://app.vosukula.online/order
-curl https://app.vosukula.online/payment
-curl https://app.vosukula.online/user
-```
-
----
-
-## Monitoring & Observability
-
-### Grafana Dashboards
-- Cluster overview: CPU, memory, pod status
-- Per-service: latency, error rate, request volume
-- Node metrics: disk, network
-
-### Prometheus Queries (useful)
-```promql
-# Pod restarts in last hour
-increase(kube_pod_container_status_restarts_total[1h]) > 3
-
-# CPU usage by namespace
-sum(rate(container_cpu_usage_seconds_total[5m])) by (namespace)
-
-# Memory usage
-container_memory_usage_bytes / container_spec_memory_limit_bytes * 100
-
-# HTTP error rate
-rate(http_requests_total{status=~"5.."}[5m])
-```
-
-### Alert Examples
-| Alert                     | PromQL                                                                  |
-|---------------------------|-------------------------------------------------------------------------|
-| Pod restarts > 3 in 5 min | `increase(kube_pod_container_status_restarts_total[5m]) > 3`            |
-| Node CPU > 80%            | `100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80` |
-| Pod not ready             | `kube_pod_status_ready{condition="false"} == 1`                         |
-
----
-
-## Route53 DNS Records
-
-| Subdomain                | Points To                                    |
-|--------------------------|----------------------------------------------|
-| `argocd.vosukula.online` | ALB from `kubectl get ingress -n argocd`     |
-| `grafana.vosukula.online`| ALB from `kubectl get ingress -n monitoring` |
-| `sonar.vosukula.online`  | ALB from `kubectl get ingress -n sonarqube`  |
-| `app.vosukula.online`    | ALB from `kubectl get ingress` (default ns)  |
-
-All use CNAME records pointing to ALB DNS name.
-
----
-
-## Useful Commands
-
-```bash
-# Cluster health
-kubectl get nodes
-kubectl get pods -A
-kubectl get pods -A | grep -v Running
-
-# ArgoCD
-kubectl get applications -n argocd
-kubectl -n argocd patch app order-service --type merge -p '{"operation":{"sync":{}}}'
-
-# Deployments
-kubectl get deployments -A
-kubectl rollout undo deployment/order-service -n order-service
-
-# Helm
-helm list -A
-helm history order-service -n order-service
-
-# GitHub Actions (gh CLI)
-gh run list --limit 5
-gh run view <run-id> --log
-
-# ECR
-aws ecr describe-images --repository-name order-service --query 'imageDetails | sort_by(@, &imagePushedAt) | [-3:].[imageTags[0],imagePushedAt]'
-```
-
----
-
-## Teardown (Destroy Everything)
-
-```bash
-# 1. Delete ArgoCD apps
-kubectl delete -f kubernetes/argocd/apps/
-
-# 2. Uninstall Helm releases
-helm uninstall monitoring -n monitoring
-helm uninstall sonarqube -n sonarqube
-
-# 3. Delete ArgoCD
-kubectl delete -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-
-# 4. Delete Argo Rollouts
-kubectl delete -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml -n argo-rollouts
-
-# 5. Delete ALB Controller
-helm uninstall aws-load-balancer-controller -n kube-system
-
-# 6. Delete namespaces
-kubectl delete namespace monitoring sonarqube argocd argo-rollouts order-service payment-service user-service
-
-# 7. Destroy Terraform infrastructure
-cd Terraform
-terraform destroy -var-file=tfvars/dev/dev.tfvars
-```
-
-⚠️ `terraform destroy` is permanent — deletes EKS, VPC, ECR, everything.
-
----
-
-## Comparison: This Project vs Jenkins Version
-
-| Aspect            | Jenkins Version                          | This Version (GitHub Actions) |
-|-------------------|------------------------------------------|-------------------------------|
-| CI Tool           | Jenkins on EKS (Helm)                    | GitHub Actions (cloud-hosted) |
-| CI Infrastructure | EC2 agent + EKS pod + plugins            | Zero (GitHub manages runners) |
-| Setup time        | 2+ hours                                 | 5 minutes (workflow file + secrets) |
-| Maintenance       | Plugin updates, disk space, agent health | None                          |
-| Cost              | EC2 24/7 + EKS pod resources             | Free (public) / 2000 min/month (private) |
-| CD Tool           | Same — ArgoCD                            | Same — ArgoCD                 |
-| Monitoring        | Same — Prometheus + Grafana              | Same — Prometheus + Grafana   |
-| Infrastructure    | Same — Terraform + EKS                   | Same — Terraform + EKS        |
-| Rollouts          | Same — Argo Rollouts                     | Same — Argo Rollouts          |
-
-**What was removed:**
-- Jenkinsfile
-- Jenkins Helm chart + values
-- Jenkins agent EC2 setup
-- Jenkins ingress
-- Jenkins namespace + secrets
-- Jenkins plugins management
-
-**What replaced it:**
-- `.github/workflows/ci-cd.yml` (single file, ~150 lines)
+Because of this: **always upgrade a non-prod cluster first**, one minor at a time,
+and only promote to prod after validation.
 
 ---
 
 ## Troubleshooting
 
-| Issue | Fix |
-|---|---|
-| GitHub Actions: "permission denied" on ECR | Check `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` secrets in GitHub |
-| ArgoCD shows OutOfSync | `kubectl apply -f kubernetes/argocd/apps/` or manual sync in UI |
-| ArgoCD can't reach Git | Verify repo URL in Application CRD is correct |
-| ALB not provisioning | Check ALB controller pods: `kubectl get pods -n kube-system` |
-| Ingress has no ADDRESS | Wait 3-5 min for ALB provisioning, check ingress events |
-| DNS not resolving | Add CNAME in Route53 pointing to ALB DNS |
-| Pod ImagePullBackOff | Check image tag exists in ECR: `aws ecr describe-images --repo <name>` |
-| Pod CrashLoopBackOff | Check logs: `kubectl logs <pod> -n <ns> --previous` |
-| Grafana secret missing | Create `grafana-admin-secret` BEFORE installing monitoring |
+| Symptom | Likely cause / fix |
+|---------|--------------------|
+| `BLOCKED: no approval on record` | Run the pre-check + approve flow first; check `python main.py --status` |
+| `BLOCKED: evidence/plan changed since approval` | The cluster/plan drifted; re-run pre-checks and re-approve |
+| `BLOCKED: approval expired` | Older than `APPROVAL_TTL_MINUTES`; re-approve |
+| Guardrail `single_minor_step` blocks | You tried to skip/downgrade; upgrade one minor at a time |
+| Guardrail `region_allowlist` blocks | Region not in `ALLOWED_REGIONS` |
+| OIDC `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Trust policy `sub`/`aud` mismatch or missing OIDC provider (see step 6a) |
+| `terraform plan` fails to init | Backend/credentials; run `terraform init` in `TERRAFORM_DIR` manually |
+| Apply hangs | Control plane + node rollout is slow (can take 20-40+ min); the tool allows a long timeout |
+| Pre-check `check_ec2_surge_quota` ALERTs | Not enough EC2 vCPU quota for surge nodes — raise the `L-1216C47A` quota before upgrading |
+| Node group stuck in `UPDATING`, surge node never launches | **Surge-capacity freeze** — hit the EC2 On-Demand vCPU quota. Request a `L-1216C47A` increase, wait for it, then re-run `terraform apply`; the node group resumes. Control plane (phase 1) is unaffected. |
 
 ---
 
-## Project File Structure
-
-```
-.
-├── .github/
-│   └── workflows/
-│       └── ci-cd.yml              ← GitHub Actions CI/CD pipeline
-├── app/
-│   ├── order-service/
-│   │   ├── app.py                 ← Flask app
-│   │   ├── Dockerfile             ← Container build
-│   │   ├── requirements.txt       ← Python deps
-│   │   └── sonar-project.properties
-│   ├── payment-service/           ← Same structure
-│   └── user-service/              ← Same structure
-├── charts/
-│   └── microservice/
-│       ├── Chart.yaml
-│       ├── values.yaml            ← Default values
-│       ├── values-order.yaml      ← Order image tag (updated by CI)
-│       ├── values-payment.yaml    ← Payment image tag
-│       ├── values-user.yaml       ← User image tag
-│       └── templates/             ← K8s manifests (deployment, service, hpa, rollout)
-├── kubernetes/
-│   ├── argocd/
-│   │   ├── apps/                  ← ArgoCD Application CRDs (3 services)
-│   │   └── argocd-ingress.yaml
-│   ├── ingress/
-│   │   ├── app-ingress.yaml       ← Routes /order, /payment, /user
-│   │   ├── grafana-ingress.yaml
-│   │   └── sonarqube-ingress.yaml
-│   ├── monitoring/
-│   │   └── grafana-values.yaml
-│   └── sonarqube/
-│       └── sonarqube-values.yaml
-├── scripts/
-│   ├── 01-install-tools.sh
-│   ├── 02-install-alb-controller.sh
-│   ├── 04-install-argocd.sh
-│   ├── 05-install-monitoring.sh
-│   ├── 06-install-sonarqube.sh
-│   └── 07-install-argo-rollouts.sh
-├── Terraform/
-│   ├── provider.tf, backend.tf
-│   ├── vpc.tf, eks.tf, ecr.tf
-│   ├── iam-irsa.tf, iam-nodegroup.tf
-│   ├── variables.tf, local.tf, output.tf
-│   └── tfvars/dev/, tfvars/prod/
-├── mcp-server/                    ← AI monitoring agent
-│   ├── mcp_server.py
-│   └── requirements.txt
-├── DEPLOYMENT-GUIDE.md            ← This file
-└── README.md                      ← Project overview
-```
-
-
----
-
-## Issues Fixed During Deployment
-
-### Issue 1: Terraform SSM Data Source Fails on First Apply
-
-**Error:** `reading SSM Parameter (/expense/dev/private_subnet_ids): couldn't find resource`
-
-**Root cause:** `data.tf` had a `data.aws_ssm_parameter` trying to READ a parameter that doesn't exist yet (created by VPC module during the same apply).
-
-**Fix:** Removed the dead SSM data source from `data.tf`. The EKS module already uses `module.vpc.private_subnet_ids` directly — no SSM lookup needed.
-
----
-
-### Issue 2: ACM Certificate Not Found
-
-**Error:** `CertificateNotFound: Certificate 'arn:aws:acm:..../b47b97ba-...' not found`
-
-**Root cause:** Old certificate ARN in ingress YAML was deleted/expired. New cert was created but ingress wasn't re-applied.
-
-**Fix:** Updated all ingress files with new cert ARN (`121432d9-8440-4ed7-b5bb-3b015fc3f9d0`) and re-applied:
-```bash
-./kubectl.exe apply -f kubernetes/argocd/argocd-ingress.yaml
-./kubectl.exe apply -f kubernetes/ingress/
-```
-
----
-
-### Issue 3: GitHub Actions Workflow Skipping on Manual Trigger
-
-**Error:** All build jobs show "Skipped" when using Run workflow.
-
-**Root cause:** Build jobs had `needs: detect-changes` — when `detect-changes` is skipped (only runs on push), dependent jobs also skip.
-
-**Fix:** Added `always() &&` to the `if` condition so manual triggers evaluate independently:
-```yaml
-if: |
-  always() &&
-  ((github.event_name == 'push' && needs.detect-changes.outputs.order == 'true') ||
-  (github.event_name == 'workflow_dispatch' && github.event.inputs.service_name == 'order-service'))
-```
-
----
-
-### Issue 4: Git Push Conflict in Workflow (Race Condition)
-
-**Error:** `! [rejected] main -> main (fetch first)` — workflow can't push because another workflow already pushed.
-
-**Root cause:** Multiple service builds run in parallel, each tries to commit + push to the same branch. Second one fails because remote is ahead.
-
-**Fix:** Added `git pull --rebase origin main` before `git push` in all build jobs.
-
----
-
-### Issue 5: ArgoCD Pointing to Wrong Git Repository
-
-**Error:** ArgoCD shows Synced but pods have `ImagePullBackOff` with old tags.
-
-**Root cause:** ArgoCD Application CRDs had `repoURL: devops-microservices-platform` (old repo) instead of `devops-microservices-nojenkins` (this repo).
-
-**Fix:** Updated all 3 app YAMLs:
-```yaml
-source:
-  repoURL: https://github.com/ShivaKrishna44/devops-microservices-nojenkins.git
-```
-Then deleted and re-applied:
-```bash
-./kubectl.exe delete -f kubernetes/argocd/apps/
-./kubectl.exe apply -f kubernetes/argocd/apps/
-```
-
----
-
-### Issue 6: App Ingress Returns "Backend service does not exist"
-
-**Error:** `services "order-service" not found` in ingress describe output.
-
-**Root cause:** App ingress was in `default` namespace but services are in `order-service`, `payment-service`, `user-service` namespaces. Ingress can only route to services in its own namespace.
-
-**Fix:** Replaced single ingress with 3 per-namespace ingresses sharing one ALB using `alb.ingress.kubernetes.io/group.name: "app-shared-alb"`. Each ingress lives in the service's namespace.
-
----
-
-### Issue 7: Flask Returns 404 on Ingress Paths
-
-**Error:** `curl https://app.vosukula.online/order` returns 404 Not Found.
-
-**Root cause:** Flask app has routes `/` and `/orders`, but ingress sends path `/order`. Flask doesn't match `/order` → returns 404.
-
-**Fix:** Added matching routes to each Flask app:
-```python
-@app.route("/")
-@app.route("/order")      # ← matches ingress path
-def home(): ...
-
-@app.route("/orders")
-@app.route("/order/orders")  # ← matches ingress path + subpath
-def orders(): ...
-```
-Rebuilt and pushed via GitHub Actions.
-
----
-
-### Issue 8: Root URL (/) Returns 404
-
-**Error:** `https://app.vosukula.online/` shows 404 but `/order`, `/payment`, `/user` work.
-
-**Root cause:** No ingress rule for the root path `/`.
-
-**Fix:** Added root path `/` to the order-service ingress (acts as landing page):
-```yaml
-paths:
-  - path: /
-    pathType: Prefix
-    backend:
-      service:
-        name: order-service
-        port:
-          number: 5000
-```
-
----
-
-## Working URLs
-
-| URL | Response |
-|---|---|
-| https://app.vosukula.online/ | `{"service":"order-service","status":"running"}` |
-| https://app.vosukula.online/order | `{"service":"order-service","status":"running"}` |
-| https://app.vosukula.online/order/orders | List of orders |
-| https://app.vosukula.online/payment | `{"service":"payment-service","status":"running"}` |
-| https://app.vosukula.online/payment/payments | List of payments |
-| https://app.vosukula.online/user | `{"service":"user-service","status":"running"}` |
-| https://app.vosukula.online/user/users | List of users |
-| https://argocd.vosukula.online | ArgoCD UI |
-
-
----
-
-## Deployment Strategy: Rolling Update vs Canary
-
-### Default: Standard Rolling Update (`rollout.enabled: false`)
-
-This is what runs by default. Kubernetes handles zero-downtime deployments:
-
-```
-New image pushed → Deployment creates new pods → old pods terminated
-Traffic shifts automatically once readiness probe passes
-```
-
-No Argo Rollouts needed. Simple and reliable.
-
-**How to deploy (standard):**
-1. Push code → GitHub Actions builds + pushes to ECR
-2. Workflow updates image tag in `values-<service>.yaml`
-3. ArgoCD syncs → Deployment updates → rolling update happens
-
-**How to rollback (standard):**
-```bash
-kubectl rollout undo deployment/order-service -n order-service
-```
-
----
-
-### Canary Mode: Argo Rollouts (`rollout.enabled: true`)
-
-Enable for high-risk deployments where you want gradual traffic shift.
-
-**To enable canary for one service:**
-
-Edit `charts/microservice/values-order.yaml`:
-```yaml
-rollout:
-  enabled: true
-```
-
-Push to Git → ArgoCD syncs → deploys Argo Rollout instead of Deployment.
-
-**What happens:**
-```
-New image → 10% traffic to canary → wait 2 min → 30% → wait → 60% → wait → 100%
-```
-
-If something looks wrong at any step:
-```bash
-kubectl argo rollouts abort order-service -n order-service
-# Instantly routes 100% back to stable version
-```
-
-**To promote (skip waiting):**
-```bash
-kubectl argo rollouts promote order-service -n order-service
-```
-
-**To monitor:**
-```bash
-kubectl argo rollouts get rollout order-service -n order-service --watch
-```
-
----
-
-### What Changes in the Helm Chart
-
-| `rollout.enabled` | Deployment | Rollout | Service Name | Ingress Routes To |
-|---|---|---|---|---|
-| `false` (default) | ✅ Created | ❌ Skipped | `order-service` | `order-service` |
-| `true` (canary) | ❌ Skipped | ✅ Created | `order-service-stable` + `order-service-canary` | `order-service-stable` |
-
-**Switch back to standard anytime:**
-```yaml
-rollout:
-  enabled: false
-```
-Push → ArgoCD removes Rollout, creates Deployment. Zero downtime.
-
----
-
-### When to Use Which
-
-| Situation | Strategy |
-|---|---|
-| Normal code updates | Standard Deployment (default) |
-| First deploy of a new service | Standard Deployment |
-| Dev/staging environments | Standard Deployment |
-| Major refactor going to production | Canary (10→30→60→100%) |
-| Payment/critical service update | Canary + manual promotion |
-| Quick hotfix | Standard Deployment (fastest) |
-
----
-
-### Ingress is Now Part of Helm Chart
-
-The app ingress is no longer a static YAML file. It's rendered per-service by Helm:
-- `charts/microservice/templates/ingress.yaml` — creates one ingress per service
-- Each service gets its own path (`/order`, `/payment`, `/user`)
-- All share the same ALB via `group.name: "vosukula-shared-alb"`
-- When canary is enabled, ingress automatically routes to `-stable` service
-
-**No manual ingress apply needed** — ArgoCD handles everything.
-
-
----
-
-### Issue 9: Prometheus Pod Stuck in Pending (Node Resource Pressure)
-
-**Error:** Grafana shows "Status: 502 — connection refused" on all dashboards.
-
-**Root cause:** Prometheus pod `Pending` — two problems:
-1. Node 1: "Too many pods" — t3.medium supports max 17 pods, hit the limit
-2. Node 2: "PV node affinity mismatch" — Prometheus PVC bound to Node 1's AZ, can't schedule on Node 2
-
-**Fix (immediate):**
-```bash
-# Scale down alertmanager to free 1 pod slot + memory on Node 1
-kubectl scale statefulset alertmanager-monitoring-kube-prometheus-alertmanager -n monitoring --replicas=0
-
-# Uninstall SonarQube (biggest memory hog, ~500MB freed)
-helm uninstall sonarqube -n sonarqube
-kubectl delete namespace sonarqube
-```
-
-After 30 seconds, Prometheus schedules on Node 1 → Grafana dashboards work again.
-
-**Fix (permanent):** Reduce HPA `minReplicas: 2` → `minReplicas: 1` in `values.yaml` so each service runs 1 pod instead of 2. Already applied.
-
-**Why this happens:** 2× t3.medium nodes (4GB RAM, 17 pods max each) running:
-- ArgoCD (6 pods)
-- Monitoring stack (6 pods)
-- 3 microservices (3-6 pods)
-- ALB Controller (2 pods)
-- SonarQube (2 pods)
-= ~19-22 pods total — exceeds capacity of 2 small nodes
-
-**Long-term solutions:**
-| Option | Impact |
-|---|---|
-| Increase node size: t3.medium → t3.large (8GB, 35 pods) | Best — doubles capacity |
-| Add 3rd node | More pod slots, redundancy |
-| Remove SonarQube from EKS (run externally) | Frees ~500MB |
-| Reduce `minReplicas: 1` for all services | Already done ✅ |
-| Scale down alertmanager when not needed | Quick win |
-
----
-
-### Issue 10: ArgoCD Repo Server DNS Failure
-
-**Error:** "Unable to sync: error resolving repo revision: dns lookup error: connection refused"
-
-**Root cause:** ArgoCD repo-server pod lost DNS resolution due to node memory pressure. CoreDNS or the pod's network stack was affected.
-
-**Fix:**
-```bash
-kubectl rollout restart deployment/argocd-repo-server -n argocd
-```
-
-After restart, repo-server reconnects to GitHub and syncs resume.
-
----
-
-### Resource Management Summary
-
-**t3.medium node limits:**
-- RAM: 4 GB (3.5 GB allocatable)
-- Pods: 17 max per node (ENI limit)
-- CPU: 2 vCPUs
-
-**What fits on 2× t3.medium (total: 7GB RAM, 34 pods):**
-```
-Essential (always running):
-  ArgoCD:          6 pods  (~800MB)
-  ALB Controller:  2 pods  (~200MB)
-  Monitoring:      5 pods  (~900MB)  [without alertmanager]
-  3 Services:      3 pods  (~400MB)
-                   ─────────────────
-  Total:           16 pods (~2.3GB)  ← fits on 2 nodes
-
-Optional (add if space allows):
-  Alertmanager:    1 pod   (~100MB)
-  SonarQube:       2 pods  (~500MB)  ← too heavy for t3.medium
-  HPA scaling:     +3 pods (~400MB)
-```
-
-**Recommendation for dev:** Keep `minReplicas: 1`, no SonarQube on cluster, no alertmanager. Fits comfortably.
-
-
----
-
-## Rollback Operations
-
-### Option 1: kubectl Rollback (Emergency — instant, 5 seconds)
-
-```bash
-# Rollback to previous version
-kubectl rollout undo deployment/order-service -n order-service
-
-# Verify
-kubectl rollout status deployment/order-service -n order-service
-
-# See history
-kubectl rollout history deployment/order-service -n order-service
-```
-
-⚠️ ArgoCD will re-sync from Git in ~3 minutes (overrides your rollback). To prevent:
-```bash
-# Pause auto-sync first
-kubectl -n argocd patch app order-service --type merge -p '{"spec":{"syncPolicy":null}}'
-
-# Rollback
-kubectl rollout undo deployment/order-service -n order-service
-
-# When ready to re-enable auto-sync:
-kubectl -n argocd patch app order-service --type merge -p '{"spec":{"syncPolicy":{"automated":{"prune":true,"selfHeal":true}}}}'
-```
-
----
-
-### Option 2: Git Revert (Recommended — clean audit trail)
-
-```bash
-# Revert the last commit (undoes the image tag update)
-git revert HEAD
-git push origin main
-
-# ArgoCD detects → syncs → deploys previous image
-```
-
-This is the GitOps-correct way — history shows who rolled back and when.
-
----
-
-### Option 3: Manual Tag Change (rollback to specific version)
-
-```bash
-# Find available tags in ECR
-aws ecr describe-images --repository-name order-service \
-  --query "imageDetails[*].imageTags" --region us-east-1
-
-# Update to the older tag
-sed -i 's|tag:.*|tag: "OLDER_TAG_HERE"|' charts/microservice/values-order.yaml
-git add . && git commit -m "rollback: order-service to OLDER_TAG" && git push
-```
-
-ArgoCD syncs the older image.
-
----
-
-### When to Use Which
-
-| Situation | Best Option | Time to Recover |
-|---|---|---|
-| Production is down NOW | Option 1 (kubectl) | 5 seconds |
-| Bad deploy, need proper rollback | Option 2 (git revert) | 1-3 minutes |
-| Need to go back 5 versions | Option 3 (manual tag) | 2-5 minutes |
-| Canary went wrong (if rollout enabled) | `kubectl argo rollouts abort` | Instant |
-
----
-
-### Important: ArgoCD + Rollback Interaction
-
-With ArgoCD auto-sync enabled (`selfHeal: true`):
-- kubectl rollback works for ~3 minutes, then ArgoCD overrides it
-- Git revert is permanent — ArgoCD syncs to the reverted state
-- **Best practice:** Always use Git-based rollback unless it's a 2am emergency
-
-
----
-
-## How Image Tags Get Updated Automatically
-
-The `values-<service>.yaml` files contain two fields:
-```yaml
-image:
-  repository: 589389425618.dkr.ecr.us-east-1.amazonaws.com/user-service   # ← Set once, never changes
-  tag: "c5009108bf4e"                                                       # ← Auto-updated by pipeline
-```
-
-**`repository`** — you set this manually once when creating the service. It always points to the ECR repo.
-
-**`tag`** — automatically updated by GitHub Actions on every successful build:
-
-```
-Developer pushes code to app/user-service/
-    ↓
-GitHub Actions triggers build-user job
-    ↓
-Builds Docker image → pushes to ECR with tag = commit SHA (first 12 chars)
-    ↓
-Pipeline runs: sed -i 's|tag:.*|tag: "NEW_SHA"|' charts/microservice/values-user.yaml
-    ↓
-Pipeline commits + pushes the updated values file to Git
-    ↓
-ArgoCD detects the tag change → deploys new image to EKS
-```
-
-**You never manually edit the `tag` field after first deploy.** The pipeline handles it on every code change.
+## Safety checklist before a real run
+
+- [ ] Tested on a throwaway cluster first
+- [ ] Target is exactly current + 1 minor
+- [ ] Pre-checks returned SAFE (no deprecated APIs, addons compatible, nodes Ready)
+- [ ] Reviewed the `terraform plan` output
+- [ ] Correct cluster name confirmed
+- [ ] Two-person approval for production
+- [ ] You accept the upgrade is irreversible

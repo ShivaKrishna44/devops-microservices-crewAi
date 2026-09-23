@@ -1,42 +1,4 @@
-# Terraform
-**/.terraform/
-*.tfstate
-*.tfstate.*
-crash.log
-override.tf
-override.tf.json
-*_override.tf
-*_override.tf.json
-
-# Keep lock file for reproducibility
-!Terraform/.terraform.lock.hcl
-
-# Terraform vars (keep dev/prod)
-**/*.tfvars
-!**/prod.tfvars
-!**/dev.tfvars
-
-# Binaries (should not be in repo)
-kubectl.exe
-helm.exe
-agent.jar
-*.exe
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-
-# Python
-__pycache__/
-*.pyc
-venv/
-**/venv/
-
-# Secrets / env — never commit real credentials
+# Secrets / env
 .env
 .env.*
 !.env.example
@@ -48,12 +10,62 @@ venv/
 credentials
 aws-credentials*
 
-# Docker
-docker/
+# Approval gate state (runtime audit trail — not source)
+state/
+**/approvals.json
 
-# Empty/unused folders
-kubernetes/jenkins/
-kubernetes/namespaces/
-kubectl.exe
-helm.exe
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+!**/.terraform.lock.hcl
+
+# Python
+__pycache__/
+*.pyc
+venv/
+**/venv/
+.venv/
+
+# Binaries
+*.exe
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
 .kiro/
+
+# ── Inherited cruft from the cloned base repo (NOT part of this project) ──
+# These are the old microservices-monitoring stack the repo was cloned from.
+# Best deleted from disk (see CLEANUP.md); ignored here as a safety net so they
+# can never be published by accident.
+/charts/
+/kubernetes/
+/mcp-server/
+/scripts/
+/Terraform/
+/terraform.tfstate
+/helm.exe
+/kubectl.exe
+# old crewAi monitoring app files under app/ (keep only the upgrade-agent files)
+app/agent.py
+app/agent.py.bk
+app/multi_agent_run.py
+app/litellm_patch.py
+app/readme.md
+app/graph/
+app/web/
+app/order-service/
+app/payment-service/
+app/user-service/
+# old crewAi tools (keep only eks_tools, upgrade_tools, health_tools, __init__)
+app/tools/aws_tools.py
+app/tools/cost_tools.py
+app/tools/deploy_tools.py
+app/tools/github_tools.py
+app/tools/incident_tools.py
+app/tools/k8s_tools.py
+app/tools/migration_tools.py
