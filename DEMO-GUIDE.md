@@ -133,7 +133,7 @@ sounds the alarm if healthy pods drop anyway. Prevention is the real control; de
 
 ---
 
-## How to Demo (Step by Step)
+## How to Demo (Step by Step explain)   
 
 ### Demo 0: Prove the safety logic works (no AWS needed) — 30 seconds
 
