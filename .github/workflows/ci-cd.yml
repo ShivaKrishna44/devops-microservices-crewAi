@@ -72,14 +72,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Debug OIDC token claims (temporary)
-        run: |
-          TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
-          PAYLOAD=$(echo "$TOKEN" | cut -d '.' -f2)
-          # pad base64url for decoding, then decode
-          PADDED="${PAYLOAD}$(printf '%.0s=' $(seq 1 $(( (4 - ${#PAYLOAD} % 4) % 4 ))))"
-          echo "$PADDED" | tr '_-' '/+' | base64 -d 2>/dev/null | jq '{sub, aud, iss, repository, repository_owner, ref, event_name, repository_id, repository_owner_id}'
-
       - name: Configure AWS Credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:

@@ -38,34 +38,10 @@ Thumbs.db
 .idea/
 .kiro/
 
-# ── Inherited cruft from the cloned base repo (NOT part of this project) ──
-# These are the old microservices-monitoring stack the repo was cloned from.
-# Best deleted from disk (see CLEANUP.md); ignored here as a safety net so they
-# can never be published by accident.
-/charts/
-/kubernetes/
-/mcp-server/
-/scripts/
-/Terraform/
+# ── Local-only artifacts (never commit) ──
+# terraform.tfstate should never be committed even though it's not in
+# Terraform/ (that dir's own .tfstate is covered by the Terraform section
+# below) — this is a stray root-level state file, not something to publish.
 /terraform.tfstate
 /helm.exe
 /kubectl.exe
-# old crewAi monitoring app files under app/ (keep only the upgrade-agent files)
-app/agent.py
-app/agent.py.bk
-app/multi_agent_run.py
-app/litellm_patch.py
-app/readme.md
-app/graph/
-app/web/
-app/order-service/
-app/payment-service/
-app/user-service/
-# old crewAi tools (keep only eks_tools, upgrade_tools, health_tools, __init__)
-app/tools/aws_tools.py
-app/tools/cost_tools.py
-app/tools/deploy_tools.py
-app/tools/github_tools.py
-app/tools/incident_tools.py
-app/tools/k8s_tools.py
-app/tools/migration_tools.py
