@@ -17,7 +17,7 @@ def payments():
         {
             "payment_id": 2001,
             "amount": 500,
-            "status": "SUCCESS"
+            "status": "SUCCESS.."
         }
     ])
 

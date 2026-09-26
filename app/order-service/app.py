@@ -24,7 +24,7 @@ def orders():
             "order_id": 1002,
             "item": "Mouse",
             "quantity": 2,
-            "status": "SHIPPED"
+            "status": "SHIPPED.."
         }
     ])
 
