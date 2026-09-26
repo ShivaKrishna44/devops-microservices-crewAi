@@ -1,6 +1,6 @@
 image:
   repository: 589389425618.dkr.ecr.us-east-1.amazonaws.com/order-service
-  tag: "${{ steps.tag.outputs.tag }}"
+  tag: "c39be7e6dbdf"
 
 ingress:
   path: "order"
