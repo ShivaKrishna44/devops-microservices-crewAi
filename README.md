@@ -1,382 +1,230 @@
-# EKS Upgrade by Agent (Human-Approved)
-# guarded-eks-upgrade-agent
+# DevOps Microservices — CI/CD to EKS
 
-An AI multi-agent workflow that upgrades an Amazon EKS cluster **one minor version at a time**, driven by a target version a human provides, and executed **only after explicit human approval**.
+Three small Flask microservices (`order-service`, `payment-service`,
+`user-service`) built, containerized, and deployed to an Amazon EKS cluster
+via GitHub Actions + Helm, with the underlying infrastructure managed by
+Terraform.
 
-The point of this project is not "let AI upgrade the cluster." It's the opposite: EKS upgrades are high-risk and irreversible (you can't downgrade the control plane), so the agents do the *tedious, error-prone* work — checking compatibility, drafting the plan, validating afterward — while a human stays firmly in control of the one dangerous action: applying the upgrade.
-
-**Docs:** [Setup & Usage](#setup) · [DEMO-GUIDE.md](DEMO-GUIDE.md) (walkthrough) · [docs/TESTING-GUIDE.md](docs/TESTING-GUIDE.md) (how to test) · [docs/DEPLOYMENT-GUIDE.md](docs/DEPLOYMENT-GUIDE.md) (deploy & operate) · [bin/README.md](bin/README.md) (helper scripts)
+> This repo previously also contained an AI multi-agent EKS-upgrade tool.
+> That agent (and its guardrails, approval gate, tests, and dedicated CI
+> workflow) has been removed from this repo. What remains below is the
+> microservices + infra baseline.
 
 ---
 
-## The workflow
+## What's in this repo
 
 ```
-   Human provides target version (e.g. 1.34)
-                  │
-                  ▼
-   ┌──────────────────────────────┐
-   │ 1. PRE-CHECK AGENT            │  Reads current version, validates the jump,
-   │                              │  scans for deprecated APIs, checks addon
-   │                              │  compatibility and node readiness.
-   └──────────────┬───────────────┘
-                  ▼
-   ┌──────────────────────────────┐
-   │ 2. UPGRADE PLANNER AGENT      │  Runs `terraform plan`, summarizes exactly
-   │                              │  what will change, and produces a
-   │                              │  GO / NO-GO recommendation with evidence.
-   └──────────────┬───────────────┘
-                  ▼
-        ╔══════════════════════════╗
-        ║  APPROVAL GATE (HUMAN)    ║  Nothing is applied until a human types
-        ║  APPROVE / REJECT         ║  APPROVE. Decision is logged with actor,
-        ╚══════════════┬═══════════╝  timestamp, reason, and the evidence shown.
-                  │ (only if APPROVED)
-                  ▼
-   ┌──────────────────────────────┐
-   │ 3. EXECUTOR AGENT             │  `terraform apply` — control plane first,
-   │                              │  then managed node groups. Gated: refuses
-   │                              │  to run without a valid approval token.
-   └──────────────┬───────────────┘
-                  ▼
-   ┌──────────────────────────────┐
-   │ 4. POST-UPGRADE VALIDATOR     │  Confirms new version, nodes Ready,
-   │                              │  system pods healthy. Reports PASS/FAIL.
-   └──────────────────────────────┘
-```
-
-## The agents
-
-| Agent | Responsibility | Can it change anything? |
-|-------|----------------|-------------------------|
-| **Pre-Check Agent** | Validate the target version, scan deprecated APIs, addon/node readiness | No — read-only |
-| **Upgrade Planner** | `terraform plan`, summarize the diff, GO/NO-GO recommendation | No — plan only |
-| **Executor Agent** | `terraform apply` (control plane → node groups) | **Yes — but only with an APPROVED token** |
-| **Post-Upgrade Validator** | Verify version, node readiness, pod health | No — read-only |
-
-## Guardrails & approval gates (defense in depth)
-
-Safety is layered — an upgrade must clear **every** layer. If any one blocks, nothing is applied.
-
-### Layer 1 — Read-only by default
-Three of the four agents (Pre-Check, Planner, Validator) have **no tools that can change anything**. Only the Executor can modify infrastructure, and only when unlocked.
-
-### Layer 1.5 — Deterministic pre-flight (before anything else)
-Run directly (not via the LLM) at the start of `request_and_check`:
-- **Cluster exists and is ACTIVE** — if the cluster is `UPDATING` (an upgrade/change already in flight), or the name/account/region is wrong, the run **aborts before any plan**. (Also enforced as `check_cluster_upgradeable` in the pre-check agent.)
-
-### Layer 2 — Deterministic guardrails (non-LLM) — `guardrails.py`
-Pattern-based checks that run before any apply. They cannot be "talked out of" a no, because no LLM is in the path:
-
-| Guardrail | Blocks when… | Severity |
-|-----------|--------------|----------|
-| `version_format` | target isn't a valid version (e.g. `1.34`) | CRITICAL |
-| `single_minor_step` | not exactly current+1 minor (downgrade, skip, or major change) | CRITICAL |
-| `cluster_name_confirmation` | the human didn't type the exact target cluster name | CRITICAL |
-| `region_allowlist` | region isn't in `ALLOWED_REGIONS` | CRITICAL |
-| `prod_two_person` | prod cluster + two-person required (raises the approver count) | WARN |
-| `precheck_verdict` | the read-only pre-check evidence contained UNSAFE / NO-GO | CRITICAL |
-
-**Availability pre-checks (zero-downtime readiness)** — run in the pre-check phase:
-
-| Check | Flags when… |
-|-------|-------------|
-| `check_pdb_coverage` | multi-replica app workloads have **no PodDisruptionBudget** — a node drain could evict all replicas at once |
-| `check_pdb_strength` | a critical PDB is **outside the safe band** — either **too loose** (`disruptionsAllowed/currentHealthy` > threshold → over-eviction downtime) or **too strict** (`disruptionsAllowed == 0`, e.g. `maxUnavailable: 0` / `minAvailable == replicas` → the drain stalls or force-evicts → downtime) (preventive) |
-| `check_capacity_headroom` | fewer than **2 Ready nodes** — a rolling node replacement would drain the only node, causing downtime |
-| `check_ec2_surge_quota` | the account lacks **EC2 vCPU quota** to launch the surge nodes — the rollover would **freeze mid-upgrade** (see below) |
-
-#### Prevention + detection, together
-
-Availability during the node rollover is protected two ways:
-- **Prevention (`check_pdb_strength`, pre-flight):** verifies critical deployments have a PDB strict enough that Kubernetes itself will **refuse** a drain that would drop them below the threshold. A PDB that merely exists isn't enough — a `maxUnavailable: 50%` PDB still permits a 50% drop. This check reads each PDB's live `disruptionsAllowed / currentHealthy` and blocks the upgrade if it exceeds the threshold.
-- **Detection (live monitor, during rollover):** the concurrent monitor sounds the alarm the moment healthy pods actually drop below the floor.
-
-The preventive PDB check is the real control (it stops the disruption from happening); the live monitor is the safety net that catches anything the PDBs didn't.
-
-#### The surge-capacity freeze (why `check_ec2_surge_quota` matters)
-
-True zero-downtime node upgrades bring up **new (surge) nodes before draining old ones**. Those surge instances count against the EC2 **"Running On-Demand Standard instances" vCPU quota** (`L-1216C47A`). If the account is near that limit:
-
-1. The managed node group tries to launch the surge node.
-2. AWS refuses (quota exceeded).
-3. The rollout **freezes** — old nodes aren't drained, new nodes can't launch, the node group sits in `UPDATING` until it times out or you intervene.
-
-`check_ec2_surge_quota` estimates the surge vCPUs the node groups will request (instance type × surge nodes per group) and compares against remaining quota headroom (`quota − in-use`). A shortfall reports `ALERT` / `UNSAFE`, which the `precheck_verdict` guardrail treats as **blocking** — so you fix the quota *before* approving, not mid-rollout.
-
-**Recovery if it does freeze:** request an increase to the `L-1216C47A` quota (Service Quotas console), wait for it to apply, then re-run `terraform apply` — the node group resumes the rollout from where it stalled. The control plane (already upgraded in phase 1) is unaffected.
-
-### Layer 3 — Human approval gate — `approval_gate.py`
-- **Typed cluster-name confirmation** — the operator must type the exact cluster name, preventing "right command, wrong cluster" mistakes.
-- **Explicit APPROVE** — a human types `APPROVE`; agents cannot self-approve.
-- **Two-person approval for production** — clusters matching `PROD_CLUSTER_MARKERS` require **two distinct approvers** (configurable). One person cannot approve twice.
-- **Evidence binding (hash-only)** — the approval is tied to a SHA-256 hash of the pre-check + plan evidence. The raw plan is **not stored** — only its hash. A separate approver re-runs the read-only pre-check; the gate verifies the freshly-generated evidence hashes to the same value. If the cluster/plan drifted since the request, the hash won't match and the approval is refused.
-- **Expiry (TTL)** — approvals go stale after `APPROVAL_TTL_MINUTES`, so a forgotten approval can't be used later against a now-different cluster.
-- **Version binding** — approving `1.34` never approves `1.35`.
-- **Account + region binding** — the approval records the AWS account ID and region; a same-named cluster in a different account/region can't reuse the approval (re-verified at apply).
-- **Two-person enforced at apply** — for a production cluster, the apply gate independently requires ≥ 2 **distinct** approvers on record, even if the stored `required_approvers` was somehow lower (belt-and-suspenders, not just advisory).
-
-### Layer 4 — Gated executor + deterministic apply path
-The apply is driven **deterministically**, not from an LLM summary:
-- `do_apply` first **re-verifies the approval against freshly-regenerated evidence** (`approval_check`) — so plan **drift between approval and apply is caught** (evidence-hash mismatch) and an **expired approval (TTL)** is rejected.
-- It then calls the executor and validation tools directly and decides pass/fail from their **own status strings** (`SUCCESS` / `COMPLETED WITH ALARM` / `BLOCKED` / `FAILED`). A degraded or failed upgrade **cannot be narrated into a success** by the model.
-- **`COMPLETED WITH ALARM` (an availability breach during rollover) is treated as FAILURE** (non-zero exit), not success.
-- The executor tool itself also re-verifies the stored approval record (version, `APPROVED`, enough distinct approvers, not expired) — it validates the **record the human created**, never agent-supplied text. Any failure returns `BLOCKED` and touches nothing.
-
-### Layer 5 — Zero-downtime execution (sequencing + validation loop)
-The apply is **phased**, not a single blind `terraform apply`:
-
-1. **Baseline first** — before touching anything, a health snapshot is captured (which nodes/pods/deployments are healthy now) so regressions can be detected later.
-2. **Phase 1 — control plane only** (`-target` the cluster). Node groups are not touched yet.
-3. **Sequence gate (dual, before touching nodes)** — the run **blocks and loops** until BOTH are true on the same iteration, stable for two consecutive checks:
-   - **AWS API:** `describe-cluster` reports the control plane is `ACTIVE` on the target version, and
-   - **Kubernetes API:** `kubectl get nodes` actually responds within `APISERVER_LATENCY_THRESHOLD_S` (default 10s).
-   A control plane can report `ACTIVE` in the AWS API while the API server is still slow right after an upgrade — so we require the real `kubectl` round-trip to be fast before proceeding. If the gate isn't satisfied in time, the run **halts before node groups**.
-4. **Phase 2 — node groups, with a LIVE availability monitor** — the managed rolling replacement (surge node up, old node drained) runs in a background thread while a monitor polls **every 15s**. The moment a **critical deployment drops below its availability floor** — `ceil(baseline_healthy × (1 − AVAILABILITY_DROP_THRESHOLD))`, e.g. losing more than **20%** of its baseline healthy pods — it:
-   - **sounds the alarm immediately** (error log + optional webhook), and
-   - if `HALT_ON_AVAILABILITY_BREACH=true` (default), **halts further node draining** so a human can debug — see below.
-   The result is flagged `COMPLETED WITH ALARM` (and, if halted, includes the cordoned nodes + resume steps) so the breach is never silently swallowed.
-
-#### How "halt further draining" works (and its honest constraint)
-
-A managed-node-group `terraform apply` **cannot be safely killed mid-instance** — interrupting it can leave the node group in a worse, inconsistent state. So the halt does **not** kill terraform. Instead it stops the drain *wave* where Kubernetes controls it: it **cordons every old (pre-flight) node still present**, marking them unschedulable so no further pods move onto them, and — combined with the strict PDBs verified pre-flight — Kubernetes **refuses further evictions**. The in-flight instance finishes, then progress stops.
-
-**Resume after debugging:** fix the workload (scale up, fix the failing pod, loosen nothing you shouldn't), then `kubectl uncordon <node>` the cordoned nodes and re-run `terraform apply` to finish the rollover. Set `HALT_ON_AVAILABILITY_BREACH=false` for alarm-only behavior (no cordon).
-5. **Validation loop (after)** — `wait_for_healthy` polls cluster health **every 30s for up to 20 minutes**, and passes only when **all** acceptance criteria hold together:
-   - every node is **Ready**,
-   - every **old (pre-flight) node is fully terminated** — a stalled rollover that leaves old nodes lingering must not pass,
-   - no pods in a bad state, and
-   - **deployment replica counts match the pre-flight baseline** (no workload silently lost/gained replicas).
-   On timeout it reports exactly which criteria are still unmet.
-6. **Regression check** — `compare_to_baseline` flags anything that was healthy **before** the upgrade but is broken **now**. Pre-existing problems don't count; new breakage does. The validator only reports PASS if version is correct, the cluster is healthy, and there are no regressions.
-
-### Layer 6 — Correct, auditable record
-- **Full audit trail** — every event (request, each approval, rejection, reset) is persisted with actor, timestamp, reason, and evidence hash, so the whole decision chain is reconstructable.
-
-### Honest limitations
-- Zero-downtime depends on your **workloads** being HA (multiple replicas + PDBs + anti-affinity). The agent *checks* for PDBs, node capacity, and EC2 surge quota and *warns/blocks*, but it can't make a single-replica app highly available.
-- The surge-quota check estimates vCPUs from instance type × surge nodes and the `L-1216C47A` quota. It's an estimate (unknown instance types use a conservative fallback; it doesn't account for RIs/Savings Plans or non-Standard families) — treat an ALERT as "investigate," and it can't see real-time AWS capacity, only your quota.
-- The phased `-target` apply assumes the standard `terraform-aws-modules/eks/aws` resource address (`module.eks.aws_eks_cluster.this`). If your module structure differs, adjust the target in `upgrade_tools.py`.
-- The regression check is a coarse health compare (pod status, deployment readiness), not deep app-level SLO monitoring. For production, pair it with real synthetic checks / Prometheus alerts.
-
-### Configurable policy (`.env`)
-| Setting | Default | Purpose |
-|---------|---------|---------|
-| `APPROVAL_TTL_MINUTES` | `60` | how long an approval stays valid (0 = never) |
-| `ALLOWED_REGIONS` | `us-east-1` | regions the agent may operate in |
-| `PROD_CLUSTER_MARKERS` | `prod,production,live` | substrings that mark a cluster as production |
-| `REQUIRE_TWO_PERSON_FOR_PROD` | `true` | require two distinct approvers for prod |
-
-## Beyond upgrade — other gated cluster operations
-
-The same safety model (deterministic guardrails → typed cluster-name confirmation → typed `APPROVE` → evidence-hash + TTL binding → apply-time re-verification → deterministic status prefixes) now covers four additional operations. **None of them bypass the human approval gate** — there is no auto-approve or skip-approval path anywhere.
-
-Select the operation with `--operation`. Default is `upgrade` (unchanged behavior).
-
-| Operation | CLI | Approval identity is bound to | Operation-specific guardrails |
-|-----------|-----|-------------------------------|-------------------------------|
-| **upgrade** (default) | `--operation upgrade --target-version 1.34` | the target version | single-minor step, version format |
-| **launch** | `--operation launch --target-version 1.34` | the target version | cluster must **not already exist** (status `ABSENT`), version format |
-| **scale** | `--operation scale --nodes 4` | the desired node count | node count sane (**no scale-to-zero**, no absurd counts), cluster ACTIVE |
-| **addon** | `--operation addon --addon vpc-cni` | the addon name | addon must be named (no blanket change), cluster ACTIVE |
-| **teardown** | `--operation teardown` | the cluster name | **strictest** — see below |
-
-Every operation still runs the operation-agnostic checks: typed cluster-name match, region allow-list, and the pre-check verdict scan.
-
-### Teardown is gated hardest
-
-Destroying a cluster is total and irreversible, so `teardown` adds controls on top of everything above:
-
-- **Always two-person** — teardown requires **two distinct approvers regardless of whether the cluster looks like production** (`gates.ALWAYS_TWO_PERSON_OPERATIONS`). The apply gate *and* the executor tool each independently enforce this, even if a stored `required_approvers` were somehow lower.
-- **Cluster name typed twice** — the operator types the exact cluster name at two separate prompts (`gr_teardown_double_confirm`). A single mistyped/auto-filled prompt can't trigger a destroy.
-- **Production is refused outright** — a cluster matching `PROD_CLUSTER_MARKERS` is blocked at the guardrail layer (`gr_teardown_not_prod`), a hard stop, not a warning.
-- **Cluster must be ACTIVE** — you can't tear down something mid-update.
-
-### How the generalized gate stays backward-compatible
-
-The approval store identity was generalized from `target_version` to an `(operation, target)` pair. To keep the existing upgrade path and its tests byte-for-byte identical:
-- `operation` defaults to `"upgrade"` everywhere.
-- For `upgrade`, the `target` **is** the target version, so the historical binding is preserved.
-- A stored approval record with **no** `operation` key is treated as `"upgrade"`.
-
-Cross-operation isolation is enforced: a `scale` approval can never authorize a `teardown`, a `launch` approval can never authorize an `upgrade`, and an approval for `scale --nodes 5` can't authorize `scale --nodes 9`. (Covered by `tests/test_operations.py`.)
-
-All operations are **Terraform-driven** through the same `TERRAFORM_DIR` — the agent never hand-rolls AWS API creates/destroys. Launch/scale/addon/teardown live in `app/tools/operation_tools.py` and return the same deterministic `SUCCESS` / `BLOCKED` / `FAILED` prefixes the apply path keys off. (The phased live-monitor path that can emit `COMPLETED WITH ALARM` remains specific to `upgrade`.)
-
-## What it upgrades
-
-The cluster is managed by Terraform (point `TERRAFORM_DIR` at your EKS Terraform — see **Terraform setup** below). A version upgrade is a single variable change:
-
-```hcl
-variable "eks_version" {
-  default = "1.33"   # ← the agent proposes bumping this to the human's target
-}
-```
-
-Terraform then upgrades the control plane and node groups through the official `terraform-aws-modules/eks/aws` module.
-
-## Project layout
-
-```
-guarded-eks-upgrade-agent/
+devops-microservices-crewAi/
 ├── app/
-│   ├── main.py            # human-driven entrypoint (input → checks → approval → apply → validate)
-│   ├── crew.py            # CrewAI agents + tasks + crew builder
-│   ├── guardrails.py      # deterministic (non-LLM) blocking checks
-│   ├── approval_gate.py   # evidence-hash + TTL + account-bound approvals, two-person for prod
-│   ├── config.py          # settings + guardrail/approval/availability policy
-│   ├── tools/
-│   │   ├── eks_tools.py       # pre-upgrade checks (version, APIs, addons, PDB, capacity, surge quota)
-│   │   ├── upgrade_tools.py   # phased terraform plan/apply (apply is gated) + sequence gate
-│   │   └── health_tools.py    # baseline, live availability monitor, halt-on-breach, validation loop
-│   ├── requirements.txt
-│   └── .env.example
-├── bin/                   # helper scripts: setup.sh/.ps1, run.sh/.ps1, test.sh
-├── tests/                 # pytest — runnable proof of the safety logic (no cluster needed)
-├── .github/workflows/eks-upgrade.yml   # CI with a human approval Environment gate
-├── docs/DEPLOYMENT-GUIDE.md · docs/TESTING-GUIDE.md
-├── DEMO-GUIDE.md
-├── .gitignore
-└── README.md
+│   ├── order-service/      # Flask app — Dockerfile + requirements.txt
+│   ├── payment-service/    # Flask app — Dockerfile + requirements.txt
+│   └── user-service/       # Flask app — Dockerfile + requirements.txt
+├── charts/
+│   └── microservice/       # shared Helm chart, one values-<service>.yaml per service
+├── Terraform/
+│   ├── vpc.tf, eks.tf, iam-*.tf, ecr.tf, ...   # VPC + EKS + IAM + ECR
+│   └── variables.tf, output.tf, backend.tf
+├── .github/workflows/
+│   ├── ci-cd.yml           # build -> push to ECR -> update Helm values (GitOps)
+│   └── codeql.yml          # static analysis
+└── docs/
+    └── LAMBDA-TO-EC2-MIGRATION.md
 ```
 
-## Setup
+## Microservices
 
-### Requirements
-- **Python 3.10–3.13** for the live agent. ⚠️ **Not 3.14** — CrewAI requires
-  `>=3.10,<3.14`, so it will not install on Python 3.14. (The unit tests in
-  `tests/` run on any version, including 3.14, via a tool shim.)
-- `aws` CLI (configured), `kubectl`, and `terraform` on your PATH.
-- An LLM key (e.g. `OPENROUTER_API_KEY`, or Groq etc. per `CREWAI_LLM`).
+Each service under `app/<service>/` is a minimal Flask app with its own
+`Dockerfile` and pinned `requirements.txt`. They're intentionally simple —
+the point of this repo is the pipeline and infra around them, not the
+business logic inside them. Each Dockerfile builds a non-root, gunicorn-served
+image on `python:3.11-slim`.
 
-### Quickest path — the setup script (recommended)
-The scripts in `bin/` handle the Python-version / venv / install dance for you.
-They auto-pick a compatible Python (3.13 → 3.12 → 3.11), create `app/venv`,
-install dependencies, create `app/.env` from the example, and run a safe
-`--status` check.
+## CI/CD (`.github/workflows/ci-cd.yml`)
 
-**Git Bash:**
+On a push to `main` touching `app/**`, `charts/**`, or the workflow file
+itself:
+1. `detect-changes` figures out which service(s) actually changed.
+2. For each changed service: build the Docker image, push it to ECR
+   (auth via GitHub OIDC — `aws-actions/configure-aws-credentials`, no
+   static AWS keys), then commit the new image tag into
+   `charts/microservice/values-<service>.yaml` (GitOps — a separate
+   process/ArgoCD is expected to pick up that commit and actually deploy it).
+
+Can also be triggered manually via `workflow_dispatch` for a single service.
+
+## Infrastructure (`Terraform/`)
+
+Standard VPC + EKS setup using the `terraform-aws-modules` registry modules,
+plus hand-written IAM for the node group and IRSA roles (EBS CSI driver, ALB
+controller). Remote state in S3. See the inline comments in each `.tf` file
+— they're written tutorial-style, explaining the "why" alongside the "what."
+
+## End-to-end: running this project from zero to a live URL
+
+Follow these in order. Each step depends on the one before it.
+
+### 0. Prerequisites
+
+- AWS account + credentials configured locally (`aws configure` or SSO)
+- `terraform` >= 1.10, `kubectl`, `helm`, `aws` CLI
+- A GitHub repo (fork/clone of this one) with Actions enabled
+- A registered domain with a Route 53 hosted zone (only needed if you want
+  the Ingress's real hostname + HTTPS working — you can skip this and hit
+  the ALB's own DNS name over plain HTTP otherwise)
+
+### 1. Provision the AWS infrastructure (Terraform)
+
+The S3 backend bucket and DynamoDB lock table referenced in
+`Terraform/tfvars/dev/backend.tfvars` must already exist — Terraform's S3
+backend does not create them for you.
+
 ```bash
-bash bin/setup.sh
-```
-**PowerShell:**
-```powershell
-./bin/setup.ps1
+# One-time: create the state bucket + lock table if they don't exist yet
+aws s3api create-bucket --bucket <your-tf-state-bucket> --region us-east-1
+aws dynamodb create-table --table-name <your-lock-table> \
+  --attribute-definitions AttributeName=LockID,AttributeType=S \
+  --key-schema AttributeName=LockID,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST
+
+# Update Terraform/tfvars/dev/backend.tfvars with your bucket/table names,
+# then:
+cd Terraform
+terraform init -backend-config=tfvars/dev/backend.tfvars
+terraform plan -var-file=tfvars/dev/dev.tfvars
+terraform apply -var-file=tfvars/dev/dev.tfvars
 ```
 
-Then edit `app/.env` and wire kubectl to your cluster:
+This creates: VPC + subnets, the EKS cluster (`expense-dev` by default) with
+a managed node group, ECR repositories for all three services, and the IAM
+roles (node group + IRSA for EBS CSI + ALB controller).
+
 ```bash
-# app/.env
-EKS_CLUSTER_NAME=expense-dev
-AWS_REGION=us-east-1
-TERRAFORM_DIR=/absolute/path/to/your/Terraform   # dir with the eks_version variable
-CREWAI_LLM=openrouter/openrouter/free            # + the matching API key
+terraform output   # note cluster_name, cluster_endpoint, etc.
+```
 
+### 2. Point kubectl at the new cluster
+
+```bash
 aws eks update-kubeconfig --name expense-dev --region us-east-1
+kubectl get nodes    # confirms auth + connectivity before going further
 ```
 
-### Manual setup (if you prefer)
+### 3. Install cluster add-ons Terraform doesn't install for you
+
+Terraform creates the IAM *roles* for these controllers (IRSA), but the
+controllers themselves are installed via Helm, not Terraform, in this repo:
+
 ```bash
-cd app
-py -3.13 -m venv venv                 # 3.13/3.12/3.11 — NOT 3.14
-source venv/Scripts/activate          # Git Bash;  PowerShell: venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env                  # then edit it
-python main.py --status
+# AWS Load Balancer Controller — required for the chart's ALB Ingress
+helm repo add eks https://aws.github.io/eks-charts
+helm repo update
+
+# Use a values file rather than --set for the annotation — the dotted
+# "eks\.amazonaws\.com/role-arn" key's backslash-escaping is unreliable
+# across shells (Git Bash / PowerShell on Windows in particular can mangle
+# it, producing "Error: INSTALLATION FAILED: failed parsing --set data:
+# error parsing index: EOF"). A values file has no such escaping problem.
+cat > alb-controller-values.yaml <<EOF
+clusterName: expense-dev
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: "$(terraform output -raw alb_controller_role_arn)"
+EOF
+
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system \
+  -f alb-controller-values.yaml
+
+# Argo Rollouts — only needed if you'll set rollout.enabled: true in any
+# values-<service>.yaml for canary deploys (off by default, see chart values)
+kubectl create namespace argo-rollouts
+kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
 ```
 
-### Running the unit tests (no cluster, no CrewAI needed)
+### 4. Set up GitHub Actions OIDC (no static AWS keys in CI)
+
 ```bash
-pip install pytest python-dotenv
-python -m pytest tests/ -v            # 97 passing — proves the safety logic
-# or:  bash bin/test.sh
+# If not already created in this AWS account:
+aws iam create-open-id-connect-provider \
+  --url https://token.actions.githubusercontent.com \
+  --client-id-list sts.amazonaws.com \
+  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+
+# Create a role trusted by your repo (see .github/workflows/ci-cd.yml for
+# the exact AWS_ROLE_ARN this pipeline expects), with permissions to push
+# to ECR and commit back to this repo's default branch.
 ```
+Update `AWS_ROLE_ARN` in `.github/workflows/ci-cd.yml` to match the role you
+created, and confirm the ECR registry URL (`ECR_REGISTRY` env var in the
+same file) matches your AWS account ID.
 
-## Terraform setup
+### 5. Trigger the pipeline
 
-This project drives an existing Terraform config that manages the EKS cluster —
-it does **not** duplicate that infrastructure code (duplication causes drift).
-Point it at your Terraform in one of two ways:
+Push a change under `app/order-service/**` (or `payment-service`/`user-service`),
+or trigger it manually.
 
-**Option A — set the path (recommended for local runs):**
+**Via the GitHub web UI (no extra tooling needed):** repo → **Actions** tab →
+**CI/CD Pipeline — Build & Deploy Microservices** → **Run workflow** →
+pick a `service_name` → **Run workflow**.
+
+**Via the GitHub CLI**, if you have `gh` installed
+(`winget install --id GitHub.cli` on Windows, then `gh auth login` once):
 ```bash
-# in app/.env
-TERRAFORM_DIR=/absolute/path/to/your/Terraform   # the dir with the eks_version variable
+gh workflow run ci-cd.yml -f service_name=order-service
 ```
 
-**Option B — vendor a copy into this repo** (for a self-contained CI run):
+This builds the image, pushes it to ECR, and commits the new tag into
+`charts/microservice/values-order.yaml`. Confirm in the Actions tab that the
+run succeeds and the commit landed.
+
+### 6. Deploy via Helm (or point ArgoCD at this repo)
+
+The CI/CD pipeline only updates the values file (GitOps) — it does not
+`helm upgrade` for you. Either deploy manually the first time:
+
 ```bash
-# copy ONLY the .tf files + tfvars, NOT .terraform/, *.tfstate, or backups
-mkdir Terraform
-cp /path/to/source/Terraform/*.tf Terraform/
-cp -r /path/to/source/Terraform/tfvars Terraform/
-cp /path/to/source/Terraform/.terraform.lock.hcl Terraform/
-# then remove any committed backend state / init dir before committing
+helm install order-service charts/microservice \
+  -f charts/microservice/values.yaml \
+  -f charts/microservice/values-order.yaml \
+  -n default
 ```
-The GitHub Actions workflow expects the Terraform at `./Terraform` (Option B).
 
-The only variable the agent changes is `eks_version` — it passes
-`-var="eks_version=<target>"` to plan/apply. Everything else in your Terraform
-stays as-is.
+or point ArgoCD's Application at `charts/microservice` with the matching
+`values-<service>.yaml` so it syncs automatically on every commit the
+pipeline makes — this is the intended long-term setup and avoids manual
+`helm upgrade` after every deploy.
 
-## Usage
+Repeat for `payment-service` and `user-service` using their own
+`values-<service>.yaml`.
 
-> `bin/run.sh` (Bash) / `bin/run.ps1` (PowerShell) run the agent through the
-> venv automatically — **no need to activate it**. Or activate the venv and call
-> `python main.py` directly. Both forms are shown below.
+### 7. Confirm it's live
 
-### Local (interactive, single approver)
 ```bash
-# via the run script (recommended — uses the venv automatically)
-bash bin/run.sh --target-version 1.34
-# 1. Read-only pre-checks + terraform plan run and print evidence
-# 2. You type the cluster name to confirm; deterministic guardrails run
-# 3. You type APPROVE (agents cannot self-approve)
-bash bin/run.sh --apply --target-version 1.34
-# 4. Executor re-verifies approval, applies (control plane -> nodes), validates
-
-# equivalent, with the venv activated:
-#   cd app && python main.py --target-version 1.34
-#             python main.py --apply --target-version 1.34
+kubectl get ingress                     # find the ALB's DNS name
+kubectl get pods -w                     # watch pods come up healthy
+curl -H "Host: app.vosukula.online" http://<alb-dns-name>/order
 ```
 
-### Two-person approval (production)
+If you own the domain in `ingress.host` (`values.yaml`) and it's in a Route
+53 hosted zone, point a record at the ALB's DNS name (or an alias record)
+and hit it directly over HTTPS using the ACM cert already wired into
+`templates/ingress.yaml`.
+
+### 8. Teardown (avoid ongoing cost)
+
 ```bash
-bash bin/run.sh --target-version 1.34 --actor alice          # opens request + 1st approval
-bash bin/run.sh --target-version 1.34 --actor bob --approve  # DISTINCT 2nd approver
-bash bin/run.sh --status                                     # shows 2/2 APPROVED
-bash bin/run.sh --apply --target-version 1.34
+helm uninstall order-service payment-service user-service
+cd Terraform
+terraform destroy -var-file=tfvars/dev/dev.tfvars
 ```
+Destroy the Helm releases before `terraform destroy` — otherwise the ALB
+Ingress resources can leave orphaned load balancers in AWS after the
+cluster is gone.
 
-### Utility commands
-```bash
-bash bin/run.sh --status     # show gate state + who has approved (safe, no cluster calls)
-bash bin/run.sh --reset      # clear the current decision
-```
+## Docs
 
-PowerShell equivalents: `./bin/run.ps1 --status`, `./bin/run.ps1 --target-version 1.34`, etc.
-
-### CI/CD (GitHub Actions, approval via Environment)
-Trigger **Actions → EKS Upgrade (Agent + Human Approval) → Run workflow**, enter
-the target version. Then:
-1. **Job 1 (precheck-plan)** runs read-only pre-checks + `terraform plan`. Always safe.
-2. **Job 2 (apply)** is gated behind the `production-eks-upgrade` **GitHub Environment**.
-   It pauses until a **required reviewer approves**. Only then does it apply.
-
-Set it up once: **Settings → Environments → New environment →
-`production-eks-upgrade` → add Required reviewers**. That reviewer approval is
-the human-in-the-loop gate in CI (equivalent to the `APPROVE` prompt locally).
-
-**Required repo config (Settings → Secrets and variables → Actions):**
-- Variables: `AWS_ROLE_ARN`, `AWS_REGION`, `EKS_CLUSTER_NAME`, `CREWAI_LLM`
-- Secrets: `OPENROUTER_API_KEY`
-
-## Safety notes (read before running against a real cluster)
-
-- **EKS upgrades are not reversible.** You cannot downgrade a control plane. Treat every run as one-way.
-- **Test on a throwaway cluster first**, never a cluster you care about.
-- The approval gate is deliberate friction. Do not automate away the `APPROVE` prompt — it is the whole safety model.
-
----
-
-*This is a portfolio/demonstration project showing safe, human-approved automation of a high-risk operation. It reuses the CrewAI agent patterns and the approval-gate concept from the companion `devops-microservices-crewAi` and `End-End-Project-Automate` projects.*
+- [`docs/LAMBDA-TO-EC2-MIGRATION.md`](docs/LAMBDA-TO-EC2-MIGRATION.md) — a
+  step-by-step guide for migrating a Java Lambda function to a single EC2
+  instance, covering all common trigger types.

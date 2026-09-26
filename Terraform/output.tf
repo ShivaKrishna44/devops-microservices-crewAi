@@ -55,3 +55,13 @@ output "node_group_role_arn" {
   description = "EKS node group IAM role ARN"
   value       = aws_iam_role.node_group.arn
 }
+
+output "alb_controller_role_arn" {
+  description = "IRSA role ARN for the AWS Load Balancer Controller (iam-irsa.tf)"
+  value       = aws_iam_role.alb_controller.arn
+}
+
+output "ebs_csi_role_arn" {
+  description = "IRSA role ARN for the EBS CSI driver (iam-irsa.tf)"
+  value       = aws_iam_role.ebs_csi.arn
+}

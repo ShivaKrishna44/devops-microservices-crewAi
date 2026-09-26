@@ -1,0 +1,5 @@
+clusterName: expense-dev
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::589389425618:role/expense-dev-alb-controller-role"

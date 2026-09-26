@@ -15,10 +15,6 @@ reviews:
 
   # What to focus on
   path_instructions:
-    - path: "app/crew.py"
-      instructions: "Focus on CrewAI best practices, agent configuration, and task design"
-    - path: "app/tools/**"
-      instructions: "Check for proper error handling, timeout usage, and security (no hardcoded secrets)"
     - path: "Terraform/**"
       instructions: "Check for security misconfigurations, missing encryption, overly permissive IAM policies"
     - path: ".github/workflows/**"

@@ -21,13 +21,14 @@ module "eks" {
   # FIX: Added CIDR restriction variable — default is 0.0.0.0/0, restrict in prod
   cluster_endpoint_public_access_cidrs = var.cluster_endpoint_public_access_cidrs
 
-  # Security: Give cluster creator admin permissions automatically
-  # This allows the person running terraform to manage the cluster
-  # NOTE: enable_cluster_creator_admin_permissions already creates an access entry
-  # for the caller identity. Setting it to true AND defining the same principal
-  # in access_entries causes a 409 conflict on re-apply.
-  # Keep this true and remove root_admin from access_entries below.
-  enable_cluster_creator_admin_permissions = true
+  # PRODUCTION PATTERN: do NOT auto-grant admin to whoever happens to run
+  # terraform apply. That's implicit, untied to a reviewed identity, and
+  # silently gives cluster-admin to any CI/CD pipeline that applies this too.
+  # Instead, every identity that needs cluster access gets a named,
+  # explicit access_entries block below — scoped to exactly what that
+  # identity needs, so access is auditable in code, not inferred from
+  # "whoever ran the command."
+  enable_cluster_creator_admin_permissions = false
 
   # Authentication mode: Use both API and ConfigMap for backwards compatibility
   # API mode is newer, ConfigMap is legacy but still supported
@@ -41,10 +42,38 @@ module "eks" {
   eks_managed_node_groups = local.eks_managed_node_groups # Defined in local.tf
 
   # Step 2: Configure AWS user/role access to EKS cluster
-  # FIX: Removed root_admin entry — it conflicts with enable_cluster_creator_admin_permissions=true
-  # which already creates an access entry for the caller (root/terraform runner).
-  # Only keeping terraform_admin as a separate explicit entry.
+  # Every principal that needs cluster access is listed here explicitly,
+  # by name, with a scoped policy. This is the auditable production pattern —
+  # nobody gets access just by being the one who ran `terraform apply`.
   access_entries = {
+    # The human/CI identity actually running Terraform still needs to be
+    # listed explicitly now that enable_cluster_creator_admin_permissions
+    # is false — otherwise nobody, including you, can reach the cluster.
+    #
+    # NOTE: EKS access entries require the underlying IAM user/role ARN,
+    # NOT an assumed-role session ARN. data.aws_caller_identity.current.arn
+    # returns arn:aws:sts::<acct>:assumed-role/<role>/<session> when you're
+    # running as an assumed role (common for CI, or an IAM user with an
+    # assumed admin role) — EKS will reject that format. If you're running
+    # Terraform as a plain IAM user, current.arn is already correct as-is.
+    # If you're running as an assumed role, replace this with the literal
+    # role ARN instead, e.g.:
+    #   principal_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/<your-actual-role-name>"
+    terraform_runner = {
+      principal_arn = data.aws_caller_identity.current.arn
+      policy_associations = {
+        admin = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = {
+            type = "cluster"
+          }
+        }
+      }
+    }
+
+    # A separate named admin identity (e.g. a break-glass/admin IAM user),
+    # kept distinct from the Terraform runner so access isn't tied to one
+    # credential only.
     terraform_admin = {
       principal_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/terraform-admin"
       policy_associations = {
@@ -56,6 +85,7 @@ module "eks" {
         }
       }
     }
+
   }
 
   # Step 3: Configure security groups for worker nodes
